@@ -16,6 +16,7 @@ function applyStableCanvasNoise(
     const offsetX = Math.trunc(Number(originX) || 0);
     const offsetY = Math.trunc(Number(originY) || 0);
     const normalizedSeed = (Number(seed) || 1) >>> 0;
+    const isCompactProbeCanvas = regionWidth <= 96 && regionHeight <= 32;
     const noise = channelNoise && typeof channelNoise === 'object' ? channelNoise : {};
     const deltas = ['r', 'g', 'b'].map((key) => {
         const value = Number(noise[key]);
@@ -38,6 +39,17 @@ function applyStableCanvasNoise(
         for (let x = 0; x < regionWidth; x++) {
             const dataIndex = (y * regionWidth + x) * 4;
             if (dataIndex + 3 >= pixels.length || pixels[dataIndex + 3] === 0) continue;
+
+            // Compact font-probe canvases use low-saturation glyph pixels.
+            // Keep those pixels native across platforms because anti-aliasing
+            // differs between Windows, macOS and Linux.
+            if (isCompactProbeCanvas) {
+                const red = pixels[dataIndex];
+                const green = pixels[dataIndex + 1];
+                const blue = pixels[dataIndex + 2];
+                const spread = Math.max(red, green, blue) - Math.min(red, green, blue);
+                if (spread <= 16) continue;
+            }
 
             const globalX = offsetX + x;
             const globalY = offsetY + y;
