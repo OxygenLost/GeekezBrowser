@@ -1686,6 +1686,29 @@ function isPreNavigationUrl(rawUrl) {
         value === 'chrome://new-tab-page/';
 }
 
+function normalizeProxyStr(proxyStr) {
+    const raw = String(proxyStr || '').trim();
+    if (!raw || isDirectProxy(raw)) return raw;
+
+    // 如果已经有协议前缀，直接返回
+    if (raw.includes('://')) return raw;
+
+    // 处理简写的 SOCKS 格式：IP:Port 或 IP:Port:User:Pass
+    if (raw.includes(':') && !raw.includes('://')) {
+        const parts = raw.split(':');
+        // IP:Port 格式
+        if (parts.length === 2) {
+            return `socks5://${parts[0]}:${parts[1]}`;
+        }
+        // IP:Port:User:Pass 格式
+        if (parts.length === 4) {
+            return `socks5://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
+        }
+    }
+
+    return raw;
+}
+
 function ensureProxyStrValid(proxyStr) {
     const raw = String(proxyStr || '').trim();
     if (!raw) {
@@ -1897,10 +1920,12 @@ async function buildProfileFromInput(rawData, profiles, settings, existingProfil
     const uniqueName = existingProfile && baseName === existingProfile.name
         ? existingProfile.name
         : buildUniqueProfileName(profiles, baseName);
-    const proxyStr = firstDefined(data.proxyStr, existingProfile?.proxyStr, '') || '';
+    let proxyStr = firstDefined(data.proxyStr, existingProfile?.proxyStr, '') || '';
     const proxyChanged = !existingProfile || (hasOwn(data, 'proxyStr') && proxyStr !== (existingProfile?.proxyStr || ''));
     if (proxyChanged) {
         ensureProxyStrValid(proxyStr);
+        // 标准化代理字符串，将简写格式转换为标准格式
+        proxyStr = normalizeProxyStr(proxyStr);
     }
 
     const incomingFingerprint = data.fingerprint && typeof data.fingerprint === 'object' ? data.fingerprint : {};
