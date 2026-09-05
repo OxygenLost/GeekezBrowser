@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GeekEZ 密码管理</title>
+  <style>
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { width: 420px; min-width: 420px; max-width: 420px; overflow-x: hidden; }
+    body { display: flex; flex-direction: column; width: 420px; min-width: 420px; max-width: 420px; min-height: 120px; max-height: 600px; margin: 0; overflow-x: hidden; background: #191b1e; color: #e9e9ed; font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; letter-spacing: 0; }
+    button, input, select, textarea { font: inherit; letter-spacing: 0; -webkit-app-region: no-drag; }
+    button { min-height: 30px; padding: 4px 10px; border: 1px solid #4a4b52; border-radius: 4px; background: #292b30; color: inherit; cursor: pointer; white-space: nowrap; }
+    button:hover { background: #373940; border-color: #72747d; }
+    button:disabled { opacity: .55; cursor: default; }
+    button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid #ef718a; outline-offset: 2px; }
+    input, select, textarea { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid #4a4b52; border-radius: 4px; background: #222429; color: inherit; }
+    input::placeholder, textarea::placeholder { color: #92959f; }
+    textarea { min-height: 70px; resize: vertical; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 16px; font-weight: 650; }
+    h2 { font-size: 14px; font-weight: 600; }
+    .header { display: flex; flex-shrink: 0; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #383a40; }
+    .brand { color: #ef718a; }
+    .muted { color: #a5a7b0; }
+    .header .muted { margin-left: auto; font-size: 12px; }
+    .icon-button { width: 30px; min-width: 30px; height: 30px; padding: 0; font-size: 20px; line-height: 1; }
+    .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) 108px; gap: 8px; padding: 12px 16px 8px; }
+    .summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 16px 10px; color: #a5a7b0; font-size: 12px; }
+    .list { max-height: 390px; min-height: 104px; overflow-y: auto; border-top: 1px solid #383a40; }
+    .item { padding: 12px 16px; border-bottom: 1px solid #383a40; }
+    .item:last-child { border-bottom: 0; }
+    .item-title { display: flex; align-items: flex-start; gap: 8px; }
+    .item-name { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 600; }
+    .badge { flex-shrink: 0; margin-top: 1px; padding: 0 5px; border: 1px solid #477666; border-radius: 3px; color: #95d8bf; font-size: 10px; }
+    .item-site, .item-user { overflow-wrap: anywhere; color: #b7b9c2; font-size: 12px; }
+    .item-site { margin-top: 2px; color: #a5a7b0; }
+    .item-user { margin-top: 3px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+    .actions button { font-size: 12px; }
+    .danger { color: #ff9ba8; }
+    .primary { border-color: #c9546d; background: #ae3751; color: #fff; }
+    .primary:hover { background: #c04360; border-color: #e47991; }
+    .empty { padding: 34px 16px; color: #a5a7b0; text-align: center; }
+    .status { flex-shrink: 0; max-height: 74px; margin: 0 16px 10px; color: #ffacb6; font-size: 12px; overflow-wrap: anywhere; overflow-y: auto; }
+    .status[data-tone="success"] { color: #95d8bf; }
+    #editor { display: flex; flex-direction: column; min-height: 0; }
+    .editor-title { display: flex; flex-shrink: 0; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid #383a40; }
+    .editor-fields { min-height: 0; max-height: 434px; overflow-y: auto; padding: 12px 16px; }
+    .field { display: block; margin-bottom: 11px; }
+    .field-label { display: block; margin-bottom: 4px; color: #c4c6ce; font-size: 12px; }
+    .input-action { display: flex; align-items: stretch; gap: 6px; }
+    .input-action input { flex: 1; }
+    .input-action button { flex-shrink: 0; }
+    .toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    .toggle input { width: 15px; height: 15px; margin: 0; accent-color: #da5a77; }
+    .twofa-fields { margin-top: 11px; padding-top: 11px; border-top: 1px solid #383a40; }
+    .twofa-fields .field { margin-bottom: 7px; }
+    .code-line { display: flex; align-items: center; gap: 10px; margin-top: 9px; min-height: 31px; }
+    .code-value { min-width: 80px; color: #95d8bf; font: 600 20px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 0; }
+    .code-expiry { color: #a5a7b0; font-size: 11px; }
+    .editor-footer { display: flex; flex-shrink: 0; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid #383a40; }
+    .delete-confirm { margin-top: 9px; color: #ffacb6; font-size: 12px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1 class="brand">GeekEZ</h1>
+    <span class="muted">密码管理</span>
+  </header>
+  <main id="listView">
+    <div class="toolbar">
+      <label class="sr-only" for="search">搜索密码</label>
+      <input id="search" type="search" placeholder="搜索名称、网站、账号或备注" autocomplete="off">
+      <label class="sr-only" for="filter">2FA 筛选</label>
+      <select id="filter">
+        <option value="all">全部密码</option>
+        <option value="twofa">已启用 2FA</option>
+        <option value="password">未启用 2FA</option>
+      </select>
+    </div>
+    <div class="summary">
+      <span id="count" aria-live="polite"></span>
+      <div>
+        <button id="reload" type="button" class="icon-button" title="重新加载密码" aria-label="重新加载密码">↻</button>
+        <button id="add" type="button" class="primary">+ 添加密码</button>
+      </div>
+    </div>
+    <p id="listStatus" class="status" role="status" hidden></p>
+    <div id="list" class="list" aria-label="已保存的密码"></div>
+  </main>
+  <form id="editor" hidden>
+    <div class="editor-title">
+      <button id="back" type="button" class="icon-button" title="返回密码列表" aria-label="返回密码列表">←</button>
+      <h2 id="editorTitle">添加密码</h2>
+    </div>
+    <div class="editor-fields">
+      <label class="field" for="name"><span class="field-label">名称</span><input id="name" maxlength="200" autocomplete="off"></label>
+      <label class="field" for="url"><span class="field-label">网站 URL</span><input id="url" type="url" required placeholder="https://example.com" autocomplete="off"></label>
+      <label class="field" for="username"><span class="field-label">用户名</span><input id="username" required autocomplete="off"></label>
+      <div class="field">
+        <label class="field-label" for="password">密码</label>
+        <div class="input-action"><input id="password" type="password" required autocomplete="new-password"><button id="showPassword" type="button" aria-label="显示密码">显示</button></div>
+      </div>
+      <label class="field" for="notes"><span class="field-label">备注</span><textarea id="notes" rows="2" maxlength="10000"></textarea></label>
+      <label class="toggle"><input id="twoFactorEnabled" type="checkbox">启用 2FA</label>
+      <div id="twoFactorFields" class="twofa-fields" hidden>
+        <div class="field">
+          <label class="field-label" for="twoFactorSecret">2FA 密钥</label>
+          <div class="input-action"><input id="twoFactorSecret" type="password" placeholder="Base32 密钥" spellcheck="false" autocomplete="off"><button id="showSecret" type="button" aria-label="显示密钥">显示</button></div>
+        </div>
+        <div class="actions">
+          <button id="uploadQr" type="button">导入二维码</button>
+          <button id="previewCode" type="button">查看验证码</button>
+          <button id="copyPreviewCode" type="button">复制验证码</button>
+        </div>
+        <input id="qrFile" type="file" accept="image/*" hidden>
+        <div id="preview" class="code-line" hidden><span id="previewValue" class="code-value"></span><span id="previewExpiry" class="code-expiry"></span></div>
+      </div>
+    </div>
+    <p id="formStatus" class="status" role="status" hidden></p>
+    <div class="editor-footer"><button id="cancel" type="button">取消</button><button id="save" type="submit" class="primary">保存</button></div>
+  </form>
+  <script src="popup.js"></script>
+</body>
+</html>

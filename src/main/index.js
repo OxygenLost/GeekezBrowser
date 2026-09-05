@@ -76,6 +76,10 @@ async function createSocksProxyAgent(proxyUrl) {
 
 import { generateXrayConfig, parseProxyLink, getProxyRemark } from './utils';
 import { generateFingerprint, getInjectScript } from './fingerprint';
+import guardBackground from './guard/background.js?raw';
+import guardPasswordContent from './guard/content-passwords.js?raw';
+import guardPopupHtml from './guard/popup.html?raw';
+import guardPopupScript from './guard/popup.js?raw';
 
 const isDev = !app.isPackaged;
 const RESOURCES_BIN = isDev ? path.join(app.getAppPath(), 'resources', 'bin') : path.join(process.resourcesPath, 'bin');
@@ -438,9 +442,25 @@ async function streamApiOpenProfile({ req, res, params, settings, profile, resol
     return { __streamHandled: true };
 }
 
-// 2. 仅用于扩展密码同步的内部服务器 (独立端口 12139，无条件常驻)
+// 2. 扩展密码同步与 2FA 的内部服务器 (独立端口 12139，无条件常驻)
 let internalApiServer = null;
 const INTERNAL_API_PORT = 12139;
+
+function normalizeTotpSecret(value) {
+    const invalidSecret = () => Object.assign(new Error('请输入有效的 Base32 密钥（至少 16 个字符）'), { statusCode: 400 });
+    if (typeof value !== 'string') throw invalidSecret();
+    const secret = value.replace(/\s+/g, '').toUpperCase().replace(/=+$/, '');
+    if (!/^[A-Z2-7]{16,103}$/.test(secret)) throw invalidSecret();
+    const { ScureBase32Plugin } = require('otplib');
+    let bytes;
+    try {
+        bytes = new ScureBase32Plugin().decode(secret);
+    } catch {
+        throw invalidSecret();
+    }
+    if (bytes.length < 10 || bytes.length > 64) throw invalidSecret();
+    return secret;
+}
 
 function createInternalApiServer() {
     const server = http.createServer(async (req, res) => {
@@ -474,13 +494,40 @@ function createInternalApiServer() {
             }));
         }
 
-        if (req.method === 'POST' && url.pathname === '/api/passwords/sync') {
+        if (req.method === 'POST' && ['/generate-totp', '/validate-totp'].includes(url.pathname)) {
             let body = await new Promise(resolve => {
                 let data = ''; req.on('data', chunk => data += chunk); req.on('end', () => resolve(data));
             });
             try {
                 const data = JSON.parse(body);
-                if (!data.profileId || !data.passwords) {
+                const secret = normalizeTotpSecret(data?.secret);
+                if (url.pathname === '/validate-totp') {
+                    res.writeHead(200); return res.end(JSON.stringify({ success: true, secret }));
+                }
+                const { generate, createGuardrails } = require('otplib');
+                // 仅在请求验证码时等待将到期的周期，避免填入后立即失效。
+                const remaining = 30000 - Date.now() % 30000;
+                if (remaining < 1500) await new Promise(resolve => setTimeout(resolve, remaining + 20));
+                const epoch = Math.floor(Date.now() / 1000);
+                const period = 30;
+                const code = await generate({
+                    secret, epoch, period, digits: 6, algorithm: 'sha1',
+                    // 兼容既有的 80-bit 服务端密钥；此接口不负责创建新密钥。
+                    guardrails: createGuardrails({ MIN_SECRET_BYTES: 10 })
+                });
+                const expiresAt = (Math.floor(epoch / period) + 1) * period * 1000;
+                res.writeHead(200); res.end(JSON.stringify({ success: true, code, expiresAt }));
+            } catch (err) {
+                res.writeHead(err.statusCode || (err instanceof SyntaxError ? 400 : 500));
+                res.end(JSON.stringify({ success: false, error: err.message }));
+            }
+        } else if (req.method === 'POST' && url.pathname === '/api/passwords/sync') {
+            let body = await new Promise(resolve => {
+                let data = ''; req.on('data', chunk => data += chunk); req.on('end', () => resolve(data));
+            });
+            try {
+                const data = JSON.parse(body);
+                if (typeof data?.profileId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(data.profileId) || !Array.isArray(data.passwords)) {
                     res.writeHead(400); return res.end(JSON.stringify({ success: false, error: 'profileId and passwords required' }));
                 }
                 const pwFile = require('path').join(DATA_PATH, data.profileId, 'passwords.json');
@@ -3025,16 +3072,21 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
     const passwords = await readEncryptedPasswords(pwFile, profileId);
 
     // 内部扩展固定使用独立端口 12139
-    const apiPort = 12139;
+    const apiPort = INTERNAL_API_PORT;
+    const backgroundConfig = `const PROFILE_ID = ${JSON.stringify(profileId || '')};\n` +
+        `const API_PORT = ${apiPort};\nconst INIT_PASSWORDS = ${JSON.stringify(passwords)};\n`;
+    const backgroundScript = backgroundConfig + guardBackground;
+    const backgroundHash = crypto.createHash('sha256').update(backgroundScript).digest('hex').slice(0, 16);
+    const backgroundFile = `background-${backgroundHash}.js`;
 
     const manifest = {
         manifest_version: 3,
         name: "GeekEZ Guard",
-        version: "1.1.0",
+        version: "1.2.1",
         description: "Privacy & Password Protection",
         permissions: ["storage", "activeTab"],
         host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
-        background: { service_worker: "background.js" },
+        background: { service_worker: backgroundFile },
         content_scripts: [
             {
                 matches: ["<all_urls>"],
@@ -3059,370 +3111,18 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
     };
     const style = watermarkStyle === 'banner' || watermarkStyle === 'off' ? watermarkStyle : 'enhanced';
     const scriptContent = getInjectScript(fingerprint, profileName, style);
-    await fs.writeJson(path.join(extDir, 'manifest.json'), manifest);
     await fs.writeFile(path.join(extDir, 'content.js'), scriptContent);
 
-    // --- background.js ---
-    const backgroundJs = `
-const PROFILE_ID = ${JSON.stringify(profileId || '')};
-const API_PORT = ${apiPort};
-const INIT_PASSWORDS = ${JSON.stringify(passwords)};
-
-// 初始化密码数据
-chrome.runtime.onInstalled.addListener(() => { initPasswords(); });
-chrome.runtime.onStartup.addListener(() => { initPasswords(); });
-
-async function initPasswords() {
-    const { geekez_passwords } = await chrome.storage.local.get('geekez_passwords');
-    if (!geekez_passwords || geekez_passwords.length === 0) {
-        if (INIT_PASSWORDS.length > 0) {
-            await chrome.storage.local.set({ geekez_passwords: INIT_PASSWORDS });
-        }
-    }
-}
-
-async function getPasswords() {
-    const { geekez_passwords } = await chrome.storage.local.get('geekez_passwords');
-    return geekez_passwords || [];
-}
-
-async function savePassword(entry) {
-    const pws = await getPasswords();
-    const idx = pws.findIndex(p => p.origin === entry.origin && p.username === entry.username);
-    const now = Date.now();
-    if (idx > -1) {
-        pws[idx] = { ...pws[idx], ...entry, updatedAt: now };
-    } else {
-        pws.push({ ...entry, createdAt: now, updatedAt: now });
-    }
-    await chrome.storage.local.set({ geekez_passwords: pws });
-    syncToElectron(pws);
-    return pws;
-}
-
-async function deletePassword(origin, username) {
-    let pws = await getPasswords();
-    pws = pws.filter(p => !(p.origin === origin && p.username === username));
-    await chrome.storage.local.set({ geekez_passwords: pws });
-    syncToElectron(pws);
-    return pws;
-}
-
-function syncToElectron(passwords) {
-    fetch(\`http://127.0.0.1:\${API_PORT}/api/passwords/sync\`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profileId: PROFILE_ID, passwords })
-    }).then(r => r.json())
-      .then(res => console.log('Sync to Electron success:', res))
-      .catch(err => console.error('Sync to Electron falied:', err));
-}
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.type === 'QUERY_PASSWORDS') {
-        getPasswords().then(pws => {
-            const matches = pws.filter(p => msg.origin && p.origin === msg.origin);
-            sendResponse({ passwords: matches });
-        });
-        return true;
-    }
-    if (msg.type === 'SAVE_PASSWORD') {
-        savePassword(msg.entry).then(pws => sendResponse({ success: true, count: pws.length }));
-        return true;
-    }
-    if (msg.type === 'DELETE_PASSWORD') {
-        deletePassword(msg.origin, msg.username).then(pws => sendResponse({ success: true, count: pws.length }));
-        return true;
-    }
-    if (msg.type === 'GET_ALL_PASSWORDS') {
-        getPasswords().then(pws => sendResponse({ passwords: pws }));
-        return true;
-    }
-});
-`;
-    await fs.writeFile(path.join(extDir, 'background.js'), backgroundJs);
-
-    // --- content_pw.js (密码自动填充 + 保存检测) ---
-    const contentPwJs = `
-(function() {
-    'use strict';
-    let fillAttempted = false;
-
-    function getOrigin() { return location.origin; }
-
-    function findPasswordFields() {
-        return Array.from(document.querySelectorAll('input[type="password"]:not([data-geekez-processed])'));
-    }
-
-    function findUsernameField(pwField) {
-        const form = pwField.closest('form') || document.body;
-        const inputs = Array.from(form.querySelectorAll('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"])'));
-        const pwIdx = inputs.indexOf(pwField);
-        for (let i = pwIdx - 1; i >= 0; i--) {
-            const inp = inputs[i];
-            const t = (inp.type || '').toLowerCase();
-            const n = (inp.name || '').toLowerCase();
-            const id = (inp.id || '').toLowerCase();
-            const ac = (inp.autocomplete || '').toLowerCase();
-            if (t === 'email' || t === 'text' || t === 'tel' ||
-                ac.includes('username') || ac.includes('email') ||
-                n.includes('user') || n.includes('email') || n.includes('login') || n.includes('account') ||
-                id.includes('user') || id.includes('email') || id.includes('login') || id.includes('account')) {
-                return inp;
-            }
-        }
-        if (pwIdx > 0) return inputs[pwIdx - 1];
-        return null;
-    }
-
-    function createFillButton(pwField, passwords) {
-        if (passwords.length === 0) return;
-        const btn = document.createElement('div');
-        btn.setAttribute('data-geekez-fill', 'true');
-        btn.style.cssText = 'position:absolute;width:20px;height:20px;cursor:pointer;z-index:999999;background:#4285f4;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);';
-        btn.textContent = 'G';
-        btn.title = 'GeeKez 自动填充';
-
-        const rect = pwField.getBoundingClientRect();
-        btn.style.position = 'absolute';
-        btn.style.left = (rect.right - 25 + window.scrollX) + 'px';
-        btn.style.top = (rect.top + (rect.height - 20) / 2 + window.scrollY) + 'px';
-
-        btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (passwords.length === 1) {
-                doFill(pwField, passwords[0]);
-            } else {
-                showDropdown(btn, pwField, passwords);
-            }
-        });
-        document.body.appendChild(btn);
-    }
-
-    function showDropdown(anchor, pwField, passwords) {
-        const existing = document.querySelector('[data-geekez-dropdown]');
-        if (existing) existing.remove();
-        const dd = document.createElement('div');
-        dd.setAttribute('data-geekez-dropdown', 'true');
-        dd.style.cssText = 'position:absolute;z-index:9999999;background:#fff;border:1px solid #ddd;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.15);min-width:200px;max-height:200px;overflow-y:auto;';
-        const r = anchor.getBoundingClientRect();
-        dd.style.left = (r.left + window.scrollX) + 'px';
-        dd.style.top = (r.bottom + 4 + window.scrollY) + 'px';
-        passwords.forEach(pw => {
-            const item = document.createElement('div');
-            item.style.cssText = 'padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid #f0f0f0;';
-            item.textContent = pw.username;
-            item.addEventListener('mouseenter', () => item.style.background = '#f5f5f5');
-            item.addEventListener('mouseleave', () => item.style.background = '#fff');
-            item.addEventListener('click', () => { doFill(pwField, pw); dd.remove(); });
-            dd.appendChild(item);
-        });
-        document.body.appendChild(dd);
-        setTimeout(() => document.addEventListener('click', () => dd.remove(), { once: true }), 100);
-    }
-
-    function doFill(pwField, pw) {
-        const userField = findUsernameField(pwField);
-        if (userField) setVal(userField, pw.username);
-        setVal(pwField, pw.password);
-    }
-
-    function setVal(el, val) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-        if(nativeSetter) nativeSetter.call(el, val);
-        else el.value = val;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-
-    // 保存最后输入的凭据
-    let lastCreds = { origin: getOrigin(), url: location.href, name: location.hostname };
-
-    function processPage() {
-        const pwFields = findPasswordFields();
-        if (pwFields.length === 0) return;
-        
-        pwFields.forEach(pwField => {
-            if (pwField.hasAttribute('data-geekez-processed')) return;
-            pwField.setAttribute('data-geekez-processed', 'true');
-            
-            // 记录用户输入，即使没有form submit也能捕获
-            pwField.addEventListener('blur', () => {
-                if (pwField.value) {
-                    lastCreds.password = pwField.value;
-                    const uField = findUsernameField(pwField);
-                    if (uField && uField.value) lastCreds.username = uField.value;
-                }
-            });
-            const uField = findUsernameField(pwField);
-            if (uField) {
-                uField.addEventListener('blur', () => {
-                   if (uField.value) lastCreds.username = uField.value; 
-                });
-            }
-        });
-
-        chrome.runtime.sendMessage({ type: 'QUERY_PASSWORDS', origin: getOrigin() }, (resp) => {
-            if (!resp || !resp.passwords) return;
-            pwFields.forEach(pwField => {
-                if(!pwField.hasAttribute('data-geekez-btn-added')) {
-                    pwField.setAttribute('data-geekez-btn-added', 'true');
-                    createFillButton(pwField, resp.passwords);
-                }
-                if (!fillAttempted && resp.passwords.length === 1) {
-                    fillAttempted = true;
-                    doFill(pwField, resp.passwords[0]);
-                }
-            });
-        });
-    }
-
-    // 监听表单提交 - 提示保存密码
-    function monitorSubmit() {
-        function attemptSave(pwField) {
-            let uVal = lastCreds.username, pVal = lastCreds.password;
-            if (pwField && pwField.value) pVal = pwField.value;
-            if (pwField) {
-                const uField = findUsernameField(pwField);
-                if (uField && uField.value) uVal = uField.value;
-            }
-            if (uVal && pVal) {
-                chrome.runtime.sendMessage({ type: 'SAVE_PASSWORD', entry: { ...lastCreds, username: uVal, password: pVal } });
-            }
-        }
-
-        document.addEventListener('submit', (e) => {
-            const form = e.target;
-            const pwField = form.querySelector('input[type="password"]') || Array.from(document.querySelectorAll('input[type="password"]')).pop();
-            attemptSave(pwField);
-        }, true);
-
-        // 也监听点击登录按钮 (扩大范围，捕获 div/span 等模拟按钮)
-        document.addEventListener('click', (e) => {
-            const el = e.target;
-            const text = (el.innerText || el.textContent || '').toLowerCase();
-            const btn = el.closest('button, input[type="submit"], input[type="button"], .btn, .button');
-            
-            if (btn || text.includes('log in') || text.includes('login') || text.includes('sign in') || text.includes('signin') || text.includes('登录') || text.includes('登入')) {
-                const pwField = (btn ? btn.closest('form') : null)?.querySelector('input[type="password"]') || Array.from(document.querySelectorAll('input[type="password"]')).pop();
-                attemptSave(pwField);
-            }
-        }, true);
-        
-        // 离开页面前如果有输入也尝试保存
-        window.addEventListener('beforeunload', () => {
-            if (lastCreds.username && lastCreds.password) {
-                chrome.runtime.sendMessage({ type: 'SAVE_PASSWORD', entry: lastCreds });
-            }
-        });
-    }
-
-    processPage();
-    monitorSubmit();
-    const obs = new MutationObserver(() => { setTimeout(processPage, 500); });
-    obs.observe(document.body, { childList: true, subtree: true });
-})();
-`;
-    await fs.writeFile(path.join(extDir, 'content_pw.js'), contentPwJs);
-
-    // --- popup.html ---
-    const popupHtml = `<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{width:320px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background:#1a1a2e;color:#e0e0e0;font-size:13px}
-.header{padding:12px 16px;background:linear-gradient(135deg,#16213e,#0f3460);display:flex;align-items:center;gap:8px}
-.header h1{font-size:15px;font-weight:600;color:#e94560}
-.header span{font-size:11px;color:#888;margin-left:auto}
-.list{max-height:300px;overflow-y:auto;padding:4px 0}
-.item{padding:10px 16px;border-bottom:1px solid #222;cursor:pointer;transition:background .15s}
-.item:hover{background:#16213e}
-.item .site{font-weight:500;color:#e94560;font-size:12px;margin-bottom:2px}
-.item .user{color:#ccc;font-size:12px}
-.item .actions{display:flex;gap:6px;margin-top:4px}
-.item .actions button{background:none;border:1px solid #444;color:#aaa;font-size:10px;padding:2px 8px;border-radius:4px;cursor:pointer}
-.item .actions button:hover{border-color:#e94560;color:#e94560}
-.empty{padding:24px 16px;text-align:center;color:#666;font-size:12px}
-.add-form{padding:12px 16px;border-top:1px solid #333}
-.add-form input{width:100%;padding:6px 8px;margin:3px 0;background:#16213e;border:1px solid #333;border-radius:4px;color:#e0e0e0;font-size:12px}
-.add-form button{width:100%;padding:6px;margin-top:6px;background:#e94560;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px;font-weight:500}
-.add-form button:hover{background:#c73450}
-.add-pw-btn{display:block;width:100%;padding:8px;background:none;border:none;border-top:1px solid #333;color:#e94560;cursor:pointer;font-size:12px}
-</style></head>
-<body>
-<div class="header"><h1>🔑 GeeKez</h1><span>密码管理</span></div>
-<div class="list" id="list"></div>
-<button class="add-pw-btn" id="addPwBtn">+ 添加密码</button>
-<div class="add-form" id="addForm" style="display:none">
-<input id="addUrl" placeholder="网址 URL"><input id="addUser" placeholder="用户名"><input id="addPw" type="password" placeholder="密码">
-<button id="addBtn">保存</button>
-</div>
-<script src="popup.js"></script>
-</body></html>`;
-    await fs.writeFile(path.join(extDir, 'popup.html'), popupHtml);
-
-    // --- popup.js ---
-    const popupJs = `
-document.addEventListener('DOMContentLoaded', async () => {
-    const list = document.getElementById('list');
-    const addPwBtn = document.getElementById('addPwBtn');
-    const addForm = document.getElementById('addForm');
-    const addBtn = document.getElementById('addBtn');
-
-    addPwBtn.addEventListener('click', () => {
-        addForm.style.display = addForm.style.display === 'none' ? 'block' : 'none';
-    });
-
-    addBtn.addEventListener('click', () => {
-        const url = document.getElementById('addUrl').value.trim();
-        const user = document.getElementById('addUser').value.trim();
-        const pw = document.getElementById('addPw').value;
-        if (!url || !user || !pw) return;
-        let origin;
-        try { origin = new URL(url).origin; } catch { origin = url; }
-        chrome.runtime.sendMessage({
-            type: 'SAVE_PASSWORD',
-            entry: { url, origin, username: user, password: pw, name: new URL(url).hostname || url }
-        }, () => { loadList(); addForm.style.display = 'none'; });
-    });
-
-    function loadList() {
-        chrome.runtime.sendMessage({ type: 'GET_ALL_PASSWORDS' }, (resp) => {
-            const pws = (resp && resp.passwords) || [];
-            if (pws.length === 0) {
-                list.innerHTML = '<div class="empty">暂无保存的密码</div>';
-                return;
-            }
-            list.innerHTML = pws.map(pw => \`
-                <div class="item">
-                    <div class="site">\${esc(pw.name || pw.origin)}</div>
-                    <div class="user">\${esc(pw.username)}</div>
-                    <div class="actions">
-                        <button data-action="copy" data-pw="\${esc(pw.password)}">复制密码</button>
-                        <button data-action="delete" data-origin="\${esc(pw.origin)}" data-user="\${esc(pw.username)}">删除</button>
-                    </div>
-                </div>
-            \`).join('');
-
-            list.querySelectorAll('[data-action="copy"]').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    navigator.clipboard.writeText(btn.dataset.pw).then(() => { btn.textContent = '✓ 已复制'; setTimeout(() => btn.textContent = '复制密码', 1500); });
-                });
-            });
-            list.querySelectorAll('[data-action="delete"]').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    chrome.runtime.sendMessage({ type: 'DELETE_PASSWORD', origin: btn.dataset.origin, username: btn.dataset.user }, () => loadList());
-                });
-            });
-        });
-    }
-
-    function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
-    loadList();
-});
-`;
-    await fs.writeFile(path.join(extDir, 'popup.js'), popupJs);
+    // The script URL must change when Guard changes; unpacked workers can retain cached code.
+    await fs.writeFile(path.join(extDir, backgroundFile), backgroundScript);
+    await fs.writeFile(path.join(extDir, 'content_pw.js'), guardPasswordContent);
+    await fs.writeFile(path.join(extDir, 'popup.html'), guardPopupHtml);
+    await fs.writeFile(path.join(extDir, 'popup.js'), guardPopupScript);
+    await fs.copy(require.resolve('jsqr'), path.join(extDir, 'jsqr.js'));
+    await fs.writeJson(path.join(extDir, 'manifest.json'), manifest);
+    const staleBackgrounds = (await fs.readdir(extDir)).filter(file =>
+        file !== backgroundFile && /^(?:background\.js|background-[a-f0-9]{16}\.js)$/.test(file));
+    for (const file of staleBackgrounds) await fs.remove(path.join(extDir, file));
 
     return extDir;
 }
