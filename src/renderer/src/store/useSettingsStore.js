@@ -16,6 +16,8 @@ export const useSettingsStore = defineStore('settings', {
         userExtensions: [],
         defaultBookmarks: [],
         defaultBookmarkScope: { mode: 'all', tags: [] },
+        defaultPasswords: [],
+        defaultPasswordScope: { mode: 'all', tags: [] },
         currentDataPath: '',
         isDefaultDataPath: true,
         activeTab: 'extensions'
@@ -51,6 +53,27 @@ export const useSettingsStore = defineStore('settings', {
                 this.defaultBookmarkScope = {
                     mode: ['all', 'includeTags', 'excludeTags'].includes(bookmarkScope.mode) ? bookmarkScope.mode : 'all',
                     tags: Array.from(new Set((Array.isArray(bookmarkScope.tags) ? bookmarkScope.tags : [])
+                        .map(tag => String(tag || '').trim())
+                        .filter(Boolean)))
+                };
+                this.defaultPasswords = Array.isArray(settings.defaultPasswords)
+                    ? settings.defaultPasswords.map(item => ({
+                        id: String(item?.id || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`),
+                        name: String(item?.name || ''),
+                        url: String(item?.url || ''),
+                        username: String(item?.username || ''),
+                        password: String(item?.password || ''),
+                        notes: String(item?.notes || ''),
+                        twoFactorEnabled: item?.twoFactorEnabled !== false && !!String(item?.twoFactorSecret || '').trim(),
+                        twoFactorSecret: String(item?.twoFactorSecret || '')
+                    }))
+                    : [];
+                const passwordScope = settings.defaultPasswordScope && typeof settings.defaultPasswordScope === 'object'
+                    ? settings.defaultPasswordScope
+                    : {};
+                this.defaultPasswordScope = {
+                    mode: ['all', 'includeTags', 'excludeTags'].includes(passwordScope.mode) ? passwordScope.mode : 'all',
+                    tags: Array.from(new Set((Array.isArray(passwordScope.tags) ? passwordScope.tags : [])
                         .map(tag => String(tag || '').trim())
                         .filter(Boolean)))
                 };
@@ -180,6 +203,32 @@ export const useSettingsStore = defineStore('settings', {
             await ipcService.saveSettings(settings);
             this.defaultBookmarks = normalizedBookmarks;
             this.defaultBookmarkScope = normalizedScope;
+        },
+
+        async saveDefaultPasswords(passwords, scope) {
+            const normalizedPasswords = (Array.isArray(passwords) ? passwords : []).map(item => ({
+                id: String(item?.id || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`),
+                name: String(item?.name || '').trim(),
+                url: String(item?.url || '').trim(),
+                username: String(item?.username || '').trim(),
+                password: String(item?.password || ''),
+                notes: String(item?.notes || '').trim(),
+                twoFactorEnabled: item?.twoFactorEnabled !== false && !!String(item?.twoFactorSecret || '').trim(),
+                twoFactorSecret: String(item?.twoFactorSecret || '').trim()
+            }));
+            const rawScope = scope && typeof scope === 'object' ? scope : {};
+            const normalizedScope = {
+                mode: ['all', 'includeTags', 'excludeTags'].includes(rawScope.mode) ? rawScope.mode : 'all',
+                tags: Array.from(new Set((Array.isArray(rawScope.tags) ? rawScope.tags : [])
+                    .map(tag => String(tag || '').trim())
+                    .filter(Boolean)))
+            };
+            const settings = (await ipcService.getSettings()) || {};
+            settings.defaultPasswords = normalizedPasswords;
+            settings.defaultPasswordScope = normalizedScope;
+            await ipcService.saveSettings(settings);
+            this.defaultPasswords = normalizedPasswords;
+            this.defaultPasswordScope = normalizedScope;
         },
 
         async loadExtensions() {

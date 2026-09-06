@@ -20,6 +20,10 @@
                     @click="settingsStore.setTab('default-bookmarks')" data-i18n="settingsTabDefaultBookmarks">
                     {{ $t('settingsTabDefaultBookmarks') }}
                 </div>
+                <div class="tab-btn" :class="{ active: settingsStore.activeTab === 'default-passwords' }"
+                    @click="settingsStore.setTab('default-passwords')" data-i18n="settingsTabDefaultPasswords">
+                    {{ $t('settingsTabDefaultPasswords') }}
+                </div>
             </div>
 
             <div id="settingsContent" style="flex:1; overflow-y:auto; padding:10px;">
@@ -193,6 +197,77 @@
                     <div class="default-bookmark-actions">
                         <span class="default-bookmark-hint">{{ $t('defaultBookmarkHint') }}</span>
                         <button class="primary" type="button" @click="handleSaveDefaultBookmarks">{{ $t('defaultBookmarkSave') }}</button>
+                    </div>
+                </div>
+
+                <!-- Default Passwords Tab -->
+                <div v-if="settingsStore.activeTab === 'default-passwords'" class="settings-section">
+                    <h3 style="margin-bottom:10px; color:var(--accent);">{{ $t('defaultPasswordTitle') }}</h3>
+                    <p class="default-bookmark-desc">{{ $t('defaultPasswordDesc') }}</p>
+
+                    <div class="default-password-list">
+                        <div v-if="settingsStore.defaultPasswords.length === 0" class="default-bookmark-empty">
+                            {{ $t('defaultPasswordEmpty') }}
+                        </div>
+                        <div v-for="(entry, index) in settingsStore.defaultPasswords" :key="entry.id || index" class="default-password-item">
+                            <div class="default-password-header">
+                                <span>{{ $t('defaultPasswordEntry') }} {{ index + 1 }}</span>
+                                <button class="danger outline default-bookmark-remove" type="button" @click="removeDefaultPassword(index)" :title="$t('defaultPasswordRemove')">×</button>
+                            </div>
+                            <div class="default-password-fields">
+                                <input v-model="entry.name" type="text" :placeholder="$t('defaultPasswordNamePlaceholder')" maxlength="200">
+                                <input v-model="entry.url" type="url" placeholder="https://example.com" spellcheck="false">
+                                <input v-model="entry.username" type="text" :placeholder="$t('defaultPasswordUsernamePlaceholder')" autocomplete="off">
+                                <input v-model="entry.password" type="password" :placeholder="$t('defaultPasswordPasswordPlaceholder')" autocomplete="new-password">
+                            </div>
+                            <textarea v-model="entry.notes" class="default-password-notes" :placeholder="$t('defaultPasswordNotesPlaceholder')" rows="2"></textarea>
+                            <label class="default-password-two-factor">
+                                <input v-model="entry.twoFactorEnabled" type="checkbox">
+                                <span>{{ $t('defaultPasswordTwoFactor') }}</span>
+                            </label>
+                            <input v-if="entry.twoFactorEnabled" v-model="entry.twoFactorSecret" class="default-password-secret" type="password" :placeholder="$t('defaultPasswordSecretPlaceholder')" autocomplete="off" spellcheck="false">
+                        </div>
+                    </div>
+
+                    <button class="outline default-bookmark-add" type="button" @click="addDefaultPassword">
+                        + {{ $t('defaultPasswordAdd') }}
+                    </button>
+
+                    <div class="default-bookmark-scope">
+                        <div class="default-bookmark-label">{{ $t('defaultPasswordScopeTitle') }}</div>
+                        <label class="default-bookmark-radio">
+                            <input v-model="settingsStore.defaultPasswordScope.mode" type="radio" value="all">
+                            <span>{{ $t('defaultBookmarkScopeAll') }}</span>
+                        </label>
+                        <label class="default-bookmark-radio">
+                            <input v-model="settingsStore.defaultPasswordScope.mode" type="radio" value="includeTags">
+                            <span>{{ $t('defaultBookmarkScopeInclude') }}</span>
+                        </label>
+                        <label class="default-bookmark-radio">
+                            <input v-model="settingsStore.defaultPasswordScope.mode" type="radio" value="excludeTags">
+                            <span>{{ $t('defaultBookmarkScopeExclude') }}</span>
+                        </label>
+
+                        <div v-if="settingsStore.defaultPasswordScope.mode !== 'all'" class="default-bookmark-tags">
+                            <div class="default-bookmark-tag-input-row">
+                                <input
+                                    v-model="passwordTagDraft"
+                                    type="text"
+                                    :placeholder="$t('defaultBookmarkTagPlaceholder')"
+                                    @keydown.enter.prevent="addPasswordTag">
+                                <button class="outline" type="button" @click="addPasswordTag">{{ $t('defaultBookmarkTagAdd') }}</button>
+                            </div>
+                            <div v-if="passwordTagOptions.length === 0" class="default-bookmark-empty">{{ $t('defaultBookmarkNoTags') }}</div>
+                            <label v-for="tag in passwordTagOptions" :key="tag" class="default-bookmark-tag">
+                                <input type="checkbox" :checked="settingsStore.defaultPasswordScope.tags.includes(tag)" @change="togglePasswordTag(tag, $event)">
+                                <span>{{ tag }}</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="default-bookmark-actions">
+                        <span class="default-bookmark-hint">{{ $t('defaultPasswordHint') }}</span>
+                        <button class="primary" type="button" @click="handleSaveDefaultPasswords">{{ $t('defaultPasswordSave') }}</button>
                     </div>
                 </div>
 
@@ -484,6 +559,7 @@ const installProgressPercent = ref(0);
 const installProgressMessage = ref('');
 const scopeGroupState = ref({});
 const bookmarkTagDraft = ref('');
+const passwordTagDraft = ref('');
 
 const bookmarkTagOptions = computed(() => {
     const tags = new Set();
@@ -494,6 +570,21 @@ const bookmarkTagOptions = computed(() => {
         }
     }
     for (const tag of Array.isArray(settingsStore.defaultBookmarkScope?.tags) ? settingsStore.defaultBookmarkScope.tags : []) {
+        const value = String(tag || '').trim();
+        if (value) tags.add(value);
+    }
+    return Array.from(tags).sort((a, b) => a.localeCompare(b));
+});
+
+const passwordTagOptions = computed(() => {
+    const tags = new Set();
+    for (const profile of Array.isArray(profileOptions.value) ? profileOptions.value : []) {
+        for (const tag of Array.isArray(profile?.tags) ? profile.tags : []) {
+            const value = String(tag || '').trim();
+            if (value) tags.add(value);
+        }
+    }
+    for (const tag of Array.isArray(settingsStore.defaultPasswordScope?.tags) ? settingsStore.defaultPasswordScope.tags : []) {
         const value = String(tag || '').trim();
         if (value) tags.add(value);
     }
@@ -635,6 +726,91 @@ const addBookmarkTag = () => {
         tags: Array.from(selected)
     };
     bookmarkTagDraft.value = '';
+};
+
+const addDefaultPassword = () => {
+    settingsStore.defaultPasswords.push({
+        id: createBookmarkId(),
+        name: '',
+        url: '',
+        username: '',
+        password: '',
+        notes: '',
+        twoFactorEnabled: false,
+        twoFactorSecret: ''
+    });
+};
+
+const removeDefaultPassword = (index) => {
+    settingsStore.defaultPasswords.splice(index, 1);
+};
+
+const togglePasswordTag = (tag, event) => {
+    const selected = new Set(settingsStore.defaultPasswordScope.tags || []);
+    if (event?.target?.checked) selected.add(tag);
+    else selected.delete(tag);
+    settingsStore.defaultPasswordScope = {
+        ...settingsStore.defaultPasswordScope,
+        tags: Array.from(selected)
+    };
+};
+
+const addPasswordTag = () => {
+    const values = String(passwordTagDraft.value || '')
+        .split(/[,，]/)
+        .map(tag => tag.trim())
+        .filter(Boolean);
+    if (values.length === 0) return;
+    const selected = new Set(settingsStore.defaultPasswordScope.tags || []);
+    values.forEach(tag => selected.add(tag));
+    settingsStore.defaultPasswordScope = {
+        ...settingsStore.defaultPasswordScope,
+        tags: Array.from(selected)
+    };
+    passwordTagDraft.value = '';
+};
+
+const handleSaveDefaultPasswords = async () => {
+    const passwords = [];
+    for (const entry of settingsStore.defaultPasswords) {
+        const urlText = String(entry?.url || '').trim();
+        let url;
+        try {
+            url = new URL(urlText);
+        } catch (error) {
+            uiStore.showAlert(window.t('defaultPasswordUrlInvalid'));
+            return;
+        }
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+            uiStore.showAlert(window.t('defaultPasswordUrlInvalid'));
+            return;
+        }
+        if (!String(entry?.username || '').trim() || !String(entry?.password || '')) {
+            uiStore.showAlert(window.t('defaultPasswordCredentialsRequired'));
+            return;
+        }
+        if (entry.twoFactorEnabled && !String(entry?.twoFactorSecret || '').trim()) {
+            uiStore.showAlert(window.t('defaultPasswordSecretRequired'));
+            return;
+        }
+        passwords.push({
+            id: String(entry.id || createBookmarkId()),
+            name: String(entry.name || '').trim() || url.hostname,
+            url: url.href,
+            username: String(entry.username || '').trim(),
+            password: String(entry.password || ''),
+            notes: String(entry.notes || ''),
+            twoFactorEnabled: !!entry.twoFactorEnabled,
+            twoFactorSecret: entry.twoFactorEnabled ? String(entry.twoFactorSecret || '').trim() : ''
+        });
+    }
+
+    try {
+        await settingsStore.saveDefaultPasswords(passwords, settingsStore.defaultPasswordScope);
+        uiStore.showAlert(window.t('defaultPasswordSaved'));
+    } catch (error) {
+        uiStore.showAlert(`${window.t('defaultPasswordSaveFailed')}${error.message || ''}`);
+    }
 };
 
 const handleSaveDefaultBookmarks = async () => {
@@ -1051,6 +1227,67 @@ const handleResetDataDirectory = async () => {
     font-size: 12px;
 }
 
+.default-password-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.default-password-item {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.08);
+}
+
+.default-password-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.default-password-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: 8px;
+}
+
+.default-password-fields input,
+.default-password-notes,
+.default-password-secret {
+    min-width: 0;
+    margin: 0;
+}
+
+.default-password-notes {
+    display: block;
+    margin-top: 8px;
+    resize: vertical;
+}
+
+.default-password-two-factor {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.default-password-two-factor input {
+    width: auto;
+    margin: 0;
+}
+
+.default-password-secret {
+    display: block;
+    margin-top: 8px;
+}
+
 .default-bookmark-scope {
     margin-top: 18px;
     padding: 10px;
@@ -1138,6 +1375,10 @@ const handleResetDataDirectory = async () => {
 
 @media (max-width: 540px) {
     .default-bookmark-fields {
+        grid-template-columns: 1fr;
+    }
+
+    .default-password-fields {
         grid-template-columns: 1fr;
     }
 

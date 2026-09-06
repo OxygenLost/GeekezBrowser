@@ -114,6 +114,7 @@ const DATA_PATH = getCustomDataPath();
 const TRASH_PATH = path.join(app.getPath('userData'), '_Trash_Bin');
 const PROFILES_FILE = path.join(DATA_PATH, 'profiles.json');
 const SETTINGS_FILE = path.join(DATA_PATH, 'settings.json');
+const DEFAULT_PASSWORDS_FILE = path.join(DATA_PATH, 'default-passwords.json');
 const USER_EXTENSIONS_DIR = path.join(DATA_PATH, '_extensions');
 
 fs.ensureDirSync(DATA_PATH);
@@ -1305,19 +1306,21 @@ function normalizeSettingsSnapshot(settings) {
     nextSettings.userExtensions = normalizeUserExtensions(nextSettings.userExtensions || []);
     nextSettings.closeBehavior = normalizeCloseBehavior(nextSettings.closeBehavior);
     nextSettings.defaultBookmarks = normalizeDefaultBookmarks(nextSettings.defaultBookmarks);
-    const bookmarkScope = nextSettings.defaultBookmarkScope && typeof nextSettings.defaultBookmarkScope === 'object'
-        ? nextSettings.defaultBookmarkScope
-        : {};
-    const scopeMode = ['all', 'includeTags', 'excludeTags'].includes(bookmarkScope.mode)
-        ? bookmarkScope.mode
-        : 'all';
-    const scopeTags = Array.from(new Set(
-        (Array.isArray(bookmarkScope.tags) ? bookmarkScope.tags : [])
+    nextSettings.defaultBookmarkScope = normalizeTagScope(nextSettings.defaultBookmarkScope);
+    nextSettings.defaultPasswordScope = normalizeTagScope(nextSettings.defaultPasswordScope);
+    delete nextSettings.defaultPasswords;
+    return nextSettings;
+}
+
+function normalizeTagScope(rawScope) {
+    const scope = rawScope && typeof rawScope === 'object' ? rawScope : {};
+    const mode = ['all', 'includeTags', 'excludeTags'].includes(scope.mode) ? scope.mode : 'all';
+    const tags = Array.from(new Set(
+        (Array.isArray(scope.tags) ? scope.tags : [])
             .map(tag => String(tag || '').trim())
             .filter(Boolean)
     ));
-    nextSettings.defaultBookmarkScope = { mode: scopeMode, tags: scopeTags };
-    return nextSettings;
+    return { mode, tags };
 }
 
 function normalizeDefaultBookmarks(rawBookmarks) {
@@ -1339,6 +1342,103 @@ function normalizeDefaultBookmarks(rawBookmarks) {
             url
         };
     }).filter(Boolean);
+}
+
+function normalizeDefaultPasswords(rawPasswords) {
+    if (!Array.isArray(rawPasswords)) throw new Error('内置账号列表格式无效');
+    const usedIds = new Set();
+    const accounts = new Set();
+    return rawPasswords.map((item, index) => {
+        const invalid = message => new Error(`第 ${index + 1} 个账号：${message}`);
+        if (!item || typeof item !== 'object') throw invalid('格式无效');
+        const rawUrl = String(item.url || '').trim();
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(rawUrl);
+        } catch (error) {
+            throw invalid('请填写有效的网站地址');
+        }
+        if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) {
+            throw invalid('请填写不含账号密码的 HTTP 或 HTTPS 网站地址');
+        }
+        const username = String(item.username || '').trim();
+        const password = String(item.password || '');
+        if (!username || !password) throw invalid('请填写用户名和密码');
+        const account = JSON.stringify([parsedUrl.origin, username]);
+        if (accounts.has(account)) throw invalid('该网站和用户名已存在');
+        accounts.add(account);
+
+        const enabled = item.twoFactorEnabled === true ||
+            (item.twoFactorEnabled !== false && Boolean(item.twoFactorSecret));
+        let twoFactorSecret = '';
+        if (enabled) {
+            try {
+                twoFactorSecret = normalizePresetTotpSecret(item.twoFactorSecret);
+            } catch (error) {
+                throw invalid(error.message);
+            }
+        }
+        const requestedId = String(item.id || '').trim();
+        const id = requestedId && !usedIds.has(requestedId) ? requestedId : uuidv4();
+        usedIds.add(id);
+        return {
+            id,
+            name: String(item.name || '').trim() || parsedUrl.hostname,
+            url: parsedUrl.href,
+            origin: parsedUrl.origin,
+            username,
+            password,
+            notes: String(item.notes || ''),
+            twoFactorEnabled: Boolean(twoFactorSecret),
+            twoFactorSecret
+        };
+    });
+}
+
+function normalizePresetTotpSecret(value) {
+    let secret = typeof value === 'string' ? value.trim() : '';
+    if (/^otpauth:/i.test(secret)) {
+        const url = new URL(secret);
+        if (url.protocol !== 'otpauth:' || url.hostname !== 'totp') throw new Error('仅支持 TOTP 配置');
+        const params = url.searchParams;
+        for (const key of ['secret', 'algorithm', 'digits', 'period']) {
+            if (params.getAll(key).length > 1) throw new Error('2FA 配置包含重复参数');
+        }
+        if ((params.has('algorithm') && params.get('algorithm').toUpperCase() !== 'SHA1') ||
+            (params.has('digits') && params.get('digits') !== '6') ||
+            (params.has('period') && params.get('period') !== '30')) {
+            throw new Error('仅支持 SHA1、6 位、30 秒的 TOTP 配置');
+        }
+        secret = params.get('secret');
+    }
+    return normalizeTotpSecret(secret);
+}
+
+async function readDefaultPasswordSettings() {
+    if (!fs.existsSync(DEFAULT_PASSWORDS_FILE)) return { passwords: [], scope: normalizeTagScope() };
+    try {
+        const data = await fs.readFile(DEFAULT_PASSWORDS_FILE);
+        const stored = JSON.parse(decryptData(data, 'GeekEZ_PW_defaults').toString('utf8'));
+        return {
+            passwords: normalizeDefaultPasswords(stored?.passwords),
+            scope: normalizeTagScope(stored?.scope)
+        };
+    } catch (error) {
+        console.warn('[Password Manager] Failed to read built-in accounts:', error.message);
+        return { passwords: [], scope: normalizeTagScope() };
+    }
+}
+
+async function writeDefaultPasswordSettings(passwords, scope) {
+    const normalizedPasswords = normalizeDefaultPasswords(passwords);
+    const payload = {
+        version: 1,
+        passwords: normalizedPasswords,
+        scope: normalizeTagScope(scope)
+    };
+    const encrypted = encryptData(Buffer.from(JSON.stringify(payload), 'utf8'), 'GeekEZ_PW_defaults');
+    await fs.writeFile(DEFAULT_PASSWORDS_FILE, encrypted);
+    return payload;
 }
 
 function chromiumBookmarkTimestamp() {
@@ -1393,14 +1493,18 @@ function collectBookmarkUrls(node, result = new Set()) {
     return result;
 }
 
-function shouldApplyDefaultBookmarks(profile, settings) {
-    const normalizedSettings = normalizeSettingsSnapshot(settings || {});
-    const scope = normalizedSettings.defaultBookmarkScope;
-    if (scope.mode === 'all') return true;
-    const selectedTags = new Set(scope.tags);
+function matchesProfileTagScope(profile, scope) {
+    const normalizedScope = normalizeTagScope(scope);
+    if (normalizedScope.mode === 'all') return true;
+    const selectedTags = new Set(normalizedScope.tags);
     const profileTags = normalizeTags(profile?.tags || []);
     const hasSelectedTag = profileTags.some(tag => selectedTags.has(tag));
-    return scope.mode === 'includeTags' ? hasSelectedTag : !hasSelectedTag;
+    return normalizedScope.mode === 'includeTags' ? hasSelectedTag : !hasSelectedTag;
+}
+
+function shouldApplyDefaultBookmarks(profile, settings) {
+    const normalizedSettings = normalizeSettingsSnapshot(settings || {});
+    return matchesProfileTagScope(profile, normalizedSettings.defaultBookmarkScope);
 }
 
 async function applyDefaultBookmarksToProfile(profile, settings) {
@@ -1451,6 +1555,65 @@ async function applyDefaultBookmarksToProfile(profile, settings) {
         await fs.writeJson(bookmarksPath, document, { spaces: 2 });
     } catch (error) {
         console.warn(`[Bookmarks] Failed to initialize defaults for ${profile.id}:`, error.message);
+    }
+    return nextProfile;
+}
+
+async function applyDefaultPasswordsToProfile(profile, settings) {
+    const nextProfile = {
+        ...profile,
+        defaultPasswordsAppliedAt: Date.now()
+    };
+    const hasStoredScope = Object.prototype.hasOwnProperty.call(settings || {}, 'defaultPasswordScope');
+    const normalizedSettings = normalizeSettingsSnapshot(settings || {});
+    const configured = await readDefaultPasswordSettings();
+    const defaults = configured.passwords;
+    const scope = hasStoredScope
+        ? normalizedSettings.defaultPasswordScope
+        : configured.scope;
+    if (!defaults.length || !matchesProfileTagScope(profile, scope)) return nextProfile;
+
+    const pwFile = path.join(DATA_PATH, profile.id, 'passwords.json');
+    try {
+        await fs.ensureDir(path.dirname(pwFile));
+        const existing = await readEncryptedPasswords(pwFile, profile.id);
+        const passwords = Array.isArray(existing) ? existing.slice() : [];
+        const existingKeys = new Set(passwords.map((entry) => {
+            let origin = String(entry?.origin || '').trim();
+            if (!origin && entry?.url) {
+                try { origin = new URL(String(entry.url)).origin; } catch { }
+            }
+            const username = String(entry?.username || '').trim();
+            return `${origin}\u0000${username}`;
+        }));
+        const usedIds = new Set(passwords.map(entry => String(entry?.id || '').trim()).filter(Boolean));
+        let added = false;
+        for (const entry of defaults) {
+            const key = `${entry.origin}\u0000${entry.username}`;
+            if (existingKeys.has(key)) continue;
+            let id = entry.id;
+            while (usedIds.has(id)) id = uuidv4();
+            usedIds.add(id);
+            const now = Date.now();
+            passwords.push({
+                id,
+                name: entry.name,
+                url: entry.url,
+                origin: entry.origin,
+                username: entry.username,
+                password: entry.password,
+                notes: entry.notes,
+                twoFactorEnabled: entry.twoFactorEnabled,
+                twoFactorSecret: entry.twoFactorSecret,
+                createdAt: now,
+                updatedAt: now
+            });
+            existingKeys.add(key);
+            added = true;
+        }
+        if (added || !fs.existsSync(pwFile)) await writeEncryptedPasswords(pwFile, passwords, profile.id);
+    } catch (error) {
+        console.warn(`[Password Manager] Failed to initialize defaults for ${profile.id}:`, error.message);
     }
     return nextProfile;
 }
@@ -2311,10 +2474,11 @@ async function handleApiRequest(method, pathname, body, params, context = {}) {
     // POST /api/profiles - Create with unique name
     if (method === 'POST' && pathname === '/api/profiles') {
         const data = parseApiBody(body);
-        const newProfile = await applyDefaultBookmarksToProfile(
+        let newProfile = await applyDefaultBookmarksToProfile(
             await buildProfileFromInput(data, profiles, settings),
             settings
         );
+        newProfile = await applyDefaultPasswordsToProfile(newProfile, settings);
         profiles.push(newProfile);
         await fs.writeJson(PROFILES_FILE, profiles);
         notifyUIRefresh(); // Notify UI to refresh
@@ -4061,10 +4225,11 @@ ipcMain.handle('update-profile', async (event, updatedProfile) => {
 ipcMain.handle('save-profile', async (event, data) => {
     const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
     const settings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
-    const newProfile = await applyDefaultBookmarksToProfile(
+    let newProfile = await applyDefaultBookmarksToProfile(
         await buildProfileFromInput(data, profiles, settings),
         settings
     );
+    newProfile = await applyDefaultPasswordsToProfile(newProfile, settings);
     profiles.push(newProfile);
     await fs.writeJson(PROFILES_FILE, profiles);
     notifyUIRefresh();
@@ -4139,8 +4304,18 @@ ipcMain.handle('delete-profile', async (event, id) => {
     return true;
 });
 ipcMain.handle('get-settings', async () => {
-    if (!fs.existsSync(SETTINGS_FILE)) {
-        return {
+    const storedSettings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
+    const hasStoredPasswordScope = Object.prototype.hasOwnProperty.call(storedSettings, 'defaultPasswordScope');
+    const normalized = normalizeSettingsSnapshot(storedSettings);
+    const defaultPasswordSettings = await readDefaultPasswordSettings();
+    const scope = hasStoredPasswordScope
+        ? normalized.defaultPasswordScope
+        : defaultPasswordSettings.scope;
+    return {
+            ...normalized,
+            defaultPasswords: defaultPasswordSettings.passwords,
+            defaultPasswordScope: scope,
+            ...(fs.existsSync(SETTINGS_FILE) ? {} : {
             preProxies: [],
             mode: 'single',
             enablePreProxy: false,
@@ -4150,17 +4325,26 @@ ipcMain.handle('get-settings', async () => {
             userExtensions: [],
             defaultBookmarks: [],
             defaultBookmarkScope: { mode: 'all', tags: [] }
-        };
-    }
-    const settings = await fs.readJson(SETTINGS_FILE);
-    return normalizeSettingsSnapshot(settings);
+            })
+    };
 });
 ipcMain.handle('save-settings', async (e, settings) => {
     const incoming = (settings && typeof settings === 'object')
         ? JSON.parse(JSON.stringify(settings))
         : {};
     const existing = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
+    const hasDefaultPasswords = Object.prototype.hasOwnProperty.call(incoming, 'defaultPasswords');
+    const requestedDefaultPasswords = hasDefaultPasswords ? incoming.defaultPasswords : null;
+    delete incoming.defaultPasswords;
+    if (hasDefaultPasswords) {
+        const defaultPasswordSettings = await writeDefaultPasswordSettings(
+            requestedDefaultPasswords,
+            incoming.defaultPasswordScope || existing.defaultPasswordScope
+        );
+        incoming.defaultPasswordScope = defaultPasswordSettings.scope;
+    }
     const merged = { ...(existing || {}), ...(incoming || {}) };
+    delete merged.defaultPasswords;
     await saveSettingsWithNormalizedExtensions(merged);
     refreshTrayMenu().catch(() => { });
     return true;
@@ -4401,6 +4585,7 @@ ipcMain.handle('set-data-directory', async (e, { newPath, migrate }) => {
         if (migrate && DATA_PATH !== newPath) {
             const oldProfiles = path.join(DATA_PATH, 'profiles.json');
             const oldSettings = path.join(DATA_PATH, 'settings.json');
+            const oldDefaultPasswords = path.join(DATA_PATH, 'default-passwords.json');
 
             // 迁移 profiles.json
             if (fs.existsSync(oldProfiles)) {
@@ -4409,6 +4594,9 @@ ipcMain.handle('set-data-directory', async (e, { newPath, migrate }) => {
             // 迁移 settings.json
             if (fs.existsSync(oldSettings)) {
                 await fs.copy(oldSettings, path.join(newPath, 'settings.json'));
+            }
+            if (fs.existsSync(oldDefaultPasswords)) {
+                await fs.copy(oldDefaultPasswords, path.join(newPath, 'default-passwords.json'));
             }
 
             // 迁移所有环境数据目录
