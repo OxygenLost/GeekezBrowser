@@ -16,6 +16,10 @@
                     @click="settingsStore.setTab('advanced')" data-i18n="settingsTabAdvanced">
                     {{ $t('settingsTabAdvanced') }}
                 </div>
+                <div class="tab-btn" :class="{ active: settingsStore.activeTab === 'default-bookmarks' }"
+                    @click="settingsStore.setTab('default-bookmarks')" data-i18n="settingsTabDefaultBookmarks">
+                    {{ $t('settingsTabDefaultBookmarks') }}
+                </div>
             </div>
 
             <div id="settingsContent" style="flex:1; overflow-y:auto; padding:10px;">
@@ -129,6 +133,66 @@
                                 {{ $t('settingsExtRemove') }}
                             </button>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Default Bookmarks Tab -->
+                <div v-if="settingsStore.activeTab === 'default-bookmarks'" class="settings-section">
+                    <h3 style="margin-bottom:10px; color:var(--accent);">{{ $t('defaultBookmarkTitle') }}</h3>
+                    <p class="default-bookmark-desc">{{ $t('defaultBookmarkDesc') }}</p>
+
+                    <div class="default-bookmark-list">
+                        <div v-if="settingsStore.defaultBookmarks.length === 0" class="default-bookmark-empty">
+                            {{ $t('defaultBookmarkEmpty') }}
+                        </div>
+                        <div v-for="(bookmark, index) in settingsStore.defaultBookmarks" :key="bookmark.id || index" class="default-bookmark-item">
+                            <div class="default-bookmark-fields">
+                                <input v-model="bookmark.name" type="text" :placeholder="$t('defaultBookmarkNamePlaceholder')" maxlength="200">
+                                <input v-model="bookmark.url" type="url" placeholder="https://example.com" spellcheck="false">
+                            </div>
+                            <button class="danger outline default-bookmark-remove" type="button" @click="removeDefaultBookmark(index)" :title="$t('defaultBookmarkRemove')">×</button>
+                        </div>
+                    </div>
+
+                    <button class="outline default-bookmark-add" type="button" @click="addDefaultBookmark">
+                        + {{ $t('defaultBookmarkAdd') }}
+                    </button>
+
+                    <div class="default-bookmark-scope">
+                        <div class="default-bookmark-label">{{ $t('defaultBookmarkScopeTitle') }}</div>
+                        <label class="default-bookmark-radio">
+                            <input v-model="settingsStore.defaultBookmarkScope.mode" type="radio" value="all">
+                            <span>{{ $t('defaultBookmarkScopeAll') }}</span>
+                        </label>
+                        <label class="default-bookmark-radio">
+                            <input v-model="settingsStore.defaultBookmarkScope.mode" type="radio" value="includeTags">
+                            <span>{{ $t('defaultBookmarkScopeInclude') }}</span>
+                        </label>
+                        <label class="default-bookmark-radio">
+                            <input v-model="settingsStore.defaultBookmarkScope.mode" type="radio" value="excludeTags">
+                            <span>{{ $t('defaultBookmarkScopeExclude') }}</span>
+                        </label>
+
+                        <div v-if="settingsStore.defaultBookmarkScope.mode !== 'all'" class="default-bookmark-tags">
+                            <div class="default-bookmark-tag-input-row">
+                                <input
+                                    v-model="bookmarkTagDraft"
+                                    type="text"
+                                    :placeholder="$t('defaultBookmarkTagPlaceholder')"
+                                    @keydown.enter.prevent="addBookmarkTag">
+                                <button class="outline" type="button" @click="addBookmarkTag">{{ $t('defaultBookmarkTagAdd') }}</button>
+                            </div>
+                            <div v-if="bookmarkTagOptions.length === 0" class="default-bookmark-empty">{{ $t('defaultBookmarkNoTags') }}</div>
+                            <label v-for="tag in bookmarkTagOptions" :key="tag" class="default-bookmark-tag">
+                                <input type="checkbox" :checked="settingsStore.defaultBookmarkScope.tags.includes(tag)" @change="toggleBookmarkTag(tag, $event)">
+                                <span>{{ tag }}</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="default-bookmark-actions">
+                        <span class="default-bookmark-hint">{{ $t('defaultBookmarkHint') }}</span>
+                        <button class="primary" type="button" @click="handleSaveDefaultBookmarks">{{ $t('defaultBookmarkSave') }}</button>
                     </div>
                 </div>
 
@@ -398,7 +462,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { settingService } from '../services/setting.service';
@@ -419,6 +483,22 @@ const installingStoreId = ref('');
 const installProgressPercent = ref(0);
 const installProgressMessage = ref('');
 const scopeGroupState = ref({});
+const bookmarkTagDraft = ref('');
+
+const bookmarkTagOptions = computed(() => {
+    const tags = new Set();
+    for (const profile of Array.isArray(profileOptions.value) ? profileOptions.value : []) {
+        for (const tag of Array.isArray(profile?.tags) ? profile.tags : []) {
+            const value = String(tag || '').trim();
+            if (value) tags.add(value);
+        }
+    }
+    for (const tag of Array.isArray(settingsStore.defaultBookmarkScope?.tags) ? settingsStore.defaultBookmarkScope.tags : []) {
+        const value = String(tag || '').trim();
+        if (value) tags.add(value);
+    }
+    return Array.from(tags).sort((a, b) => a.localeCompare(b));
+});
 
 onMounted(async () => {
     settingService.onExtensionInstallProgress((payload) => {
@@ -434,6 +514,10 @@ onMounted(async () => {
     await settingsStore.loadSettings();
     await loadProfileOptions();
     await handleSearchStore();
+});
+
+watch(() => uiStore.settingsModalVisible, (visible) => {
+    if (visible) loadProfileOptions();
 });
 
 watch(() => settingsStore.apiPort, (newVal) => {
@@ -515,6 +599,75 @@ const handleExtensionScopeChange = async (ext, mode) => {
         await settingsStore.updateExtensionScope(ext.id, applyMode, profileIds);
     } catch (e) {
         uiStore.showAlert(`保存范围失败: ${e.message}`);
+    }
+};
+
+const createBookmarkId = () => window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+const addDefaultBookmark = () => {
+    settingsStore.defaultBookmarks.push({ id: createBookmarkId(), name: '', url: '' });
+};
+
+const removeDefaultBookmark = (index) => {
+    settingsStore.defaultBookmarks.splice(index, 1);
+};
+
+const toggleBookmarkTag = (tag, event) => {
+    const selected = new Set(settingsStore.defaultBookmarkScope.tags || []);
+    if (event?.target?.checked) selected.add(tag);
+    else selected.delete(tag);
+    settingsStore.defaultBookmarkScope = {
+        ...settingsStore.defaultBookmarkScope,
+        tags: Array.from(selected)
+    };
+};
+
+const addBookmarkTag = () => {
+    const values = String(bookmarkTagDraft.value || '')
+        .split(/[,，]/)
+        .map(tag => tag.trim())
+        .filter(Boolean);
+    if (values.length === 0) return;
+    const selected = new Set(settingsStore.defaultBookmarkScope.tags || []);
+    values.forEach(tag => selected.add(tag));
+    settingsStore.defaultBookmarkScope = {
+        ...settingsStore.defaultBookmarkScope,
+        tags: Array.from(selected)
+    };
+    bookmarkTagDraft.value = '';
+};
+
+const handleSaveDefaultBookmarks = async () => {
+    const bookmarks = [];
+    for (const bookmark of settingsStore.defaultBookmarks) {
+        const url = String(bookmark?.url || '').trim();
+        if (!url) {
+            uiStore.showAlert(window.t('defaultBookmarkUrlRequired'));
+            return;
+        }
+        let parsed;
+        try {
+            parsed = new URL(url);
+        } catch (error) {
+            uiStore.showAlert(window.t('defaultBookmarkUrlInvalid'));
+            return;
+        }
+        if (!['http:', 'https:'].includes(parsed.protocol)) {
+            uiStore.showAlert(window.t('defaultBookmarkUrlInvalid'));
+            return;
+        }
+        bookmarks.push({
+            id: String(bookmark.id || createBookmarkId()),
+            name: String(bookmark.name || '').trim() || parsed.hostname,
+            url
+        });
+    }
+
+    try {
+        await settingsStore.saveDefaultBookmarks(bookmarks, settingsStore.defaultBookmarkScope);
+        uiStore.showAlert(window.t('defaultBookmarkSaved'));
+    } catch (error) {
+        uiStore.showAlert(`${window.t('defaultBookmarkSaveFailed')}${error.message || ''}`);
     }
 };
 
@@ -846,6 +999,152 @@ const handleResetDataDirectory = async () => {
     font-size: 12px;
     opacity: 0.65;
     line-height: 1;
+}
+
+.default-bookmark-desc,
+.default-bookmark-hint {
+    font-size: 12px;
+    opacity: 0.7;
+    line-height: 1.5;
+}
+
+.default-bookmark-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.default-bookmark-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.08);
+}
+
+.default-bookmark-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+}
+
+.default-bookmark-fields input {
+    min-width: 0;
+    margin: 0;
+}
+
+.default-bookmark-remove {
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    padding: 0;
+    font-size: 18px;
+    line-height: 1;
+}
+
+.default-bookmark-add {
+    margin-top: 10px;
+    font-size: 12px;
+}
+
+.default-bookmark-scope {
+    margin-top: 18px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.08);
+}
+
+.default-bookmark-label {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+
+.default-bookmark-radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 14px 6px 0;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.default-bookmark-radio input,
+.default-bookmark-tag input {
+    width: auto;
+    margin: 0;
+}
+
+.default-bookmark-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+.default-bookmark-tag-input-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    width: 100%;
+}
+
+.default-bookmark-tag-input-row input {
+    min-width: 0;
+    margin: 0;
+}
+
+.default-bookmark-tag-input-row button {
+    margin: 0;
+    white-space: nowrap;
+    font-size: 12px;
+}
+
+.default-bookmark-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.default-bookmark-empty {
+    padding: 14px;
+    text-align: center;
+    font-size: 12px;
+    opacity: 0.6;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+}
+
+.default-bookmark-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.default-bookmark-actions button {
+    flex-shrink: 0;
+}
+
+@media (max-width: 540px) {
+    .default-bookmark-fields {
+        grid-template-columns: 1fr;
+    }
+
+    .default-bookmark-actions {
+        align-items: flex-start;
+        flex-direction: column;
+    }
 }
 
 </style>

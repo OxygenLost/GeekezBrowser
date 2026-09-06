@@ -14,6 +14,8 @@ export const useSettingsStore = defineStore('settings', {
         apiStarting: false,
         watermarkStyle: 'enhanced',
         userExtensions: [],
+        defaultBookmarks: [],
+        defaultBookmarkScope: { mode: 'all', tags: [] },
         currentDataPath: '',
         isDefaultDataPath: true,
         activeTab: 'extensions'
@@ -36,6 +38,22 @@ export const useSettingsStore = defineStore('settings', {
                 this.watermarkStyle = settings.watermarkStyle === 'banner' || settings.watermarkStyle === 'off'
                     ? settings.watermarkStyle
                     : 'enhanced';
+                this.defaultBookmarks = Array.isArray(settings.defaultBookmarks)
+                    ? settings.defaultBookmarks.map(item => ({
+                        id: String(item?.id || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`),
+                        name: String(item?.name || ''),
+                        url: String(item?.url || '')
+                    }))
+                    : [];
+                const bookmarkScope = settings.defaultBookmarkScope && typeof settings.defaultBookmarkScope === 'object'
+                    ? settings.defaultBookmarkScope
+                    : {};
+                this.defaultBookmarkScope = {
+                    mode: ['all', 'includeTags', 'excludeTags'].includes(bookmarkScope.mode) ? bookmarkScope.mode : 'all',
+                    tags: Array.from(new Set((Array.isArray(bookmarkScope.tags) ? bookmarkScope.tags : [])
+                        .map(tag => String(tag || '').trim())
+                        .filter(Boolean)))
+                };
                 localStorage.setItem('geekez_watermark_style', this.watermarkStyle);
 
                 // Load API Status
@@ -141,6 +159,27 @@ export const useSettingsStore = defineStore('settings', {
             const settings = await ipcService.getSettings();
             settings.watermarkStyle = nextStyle;
             await ipcService.saveSettings(settings);
+        },
+
+        async saveDefaultBookmarks(bookmarks, scope) {
+            const normalizedBookmarks = (Array.isArray(bookmarks) ? bookmarks : []).map(item => ({
+                id: String(item?.id || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`),
+                name: String(item?.name || '').trim(),
+                url: String(item?.url || '').trim()
+            }));
+            const rawScope = scope && typeof scope === 'object' ? scope : {};
+            const normalizedScope = {
+                mode: ['all', 'includeTags', 'excludeTags'].includes(rawScope.mode) ? rawScope.mode : 'all',
+                tags: Array.from(new Set((Array.isArray(rawScope.tags) ? rawScope.tags : [])
+                    .map(tag => String(tag || '').trim())
+                    .filter(Boolean)))
+            };
+            const settings = (await ipcService.getSettings()) || {};
+            settings.defaultBookmarks = normalizedBookmarks;
+            settings.defaultBookmarkScope = normalizedScope;
+            await ipcService.saveSettings(settings);
+            this.defaultBookmarks = normalizedBookmarks;
+            this.defaultBookmarkScope = normalizedScope;
         },
 
         async loadExtensions() {

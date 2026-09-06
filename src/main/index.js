@@ -1304,7 +1304,155 @@ function normalizeSettingsSnapshot(settings) {
     nextSettings.notify = !!nextSettings.notify;
     nextSettings.userExtensions = normalizeUserExtensions(nextSettings.userExtensions || []);
     nextSettings.closeBehavior = normalizeCloseBehavior(nextSettings.closeBehavior);
+    nextSettings.defaultBookmarks = normalizeDefaultBookmarks(nextSettings.defaultBookmarks);
+    const bookmarkScope = nextSettings.defaultBookmarkScope && typeof nextSettings.defaultBookmarkScope === 'object'
+        ? nextSettings.defaultBookmarkScope
+        : {};
+    const scopeMode = ['all', 'includeTags', 'excludeTags'].includes(bookmarkScope.mode)
+        ? bookmarkScope.mode
+        : 'all';
+    const scopeTags = Array.from(new Set(
+        (Array.isArray(bookmarkScope.tags) ? bookmarkScope.tags : [])
+            .map(tag => String(tag || '').trim())
+            .filter(Boolean)
+    ));
+    nextSettings.defaultBookmarkScope = { mode: scopeMode, tags: scopeTags };
     return nextSettings;
+}
+
+function normalizeDefaultBookmarks(rawBookmarks) {
+    if (!Array.isArray(rawBookmarks)) return [];
+    return rawBookmarks.map((item) => {
+        if (!item || typeof item !== 'object') return null;
+        const url = String(item.url || '').trim();
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(url);
+        } catch (error) {
+            return null;
+        }
+        if (!['http:', 'https:'].includes(parsedUrl.protocol)) return null;
+        const name = String(item.name || '').trim() || parsedUrl.hostname;
+        return {
+            id: String(item.id || uuidv4()),
+            name,
+            url
+        };
+    }).filter(Boolean);
+}
+
+function chromiumBookmarkTimestamp() {
+    return String((Date.now() + 11644473600000) * 1000);
+}
+
+function createBookmarkRoot(id, guid, name) {
+    const timestamp = chromiumBookmarkTimestamp();
+    return {
+        children: [],
+        date_added: timestamp,
+        date_modified: timestamp,
+        guid,
+        id: String(id),
+        name,
+        type: 'folder'
+    };
+}
+
+function normalizeBookmarksDocument(rawDocument) {
+    const document = rawDocument && typeof rawDocument === 'object' ? rawDocument : {};
+    if (!document.roots || typeof document.roots !== 'object') document.roots = {};
+    const rootDefaults = [
+        ['bookmark_bar', '1', 'bookmark_bar', 'Bookmarks bar'],
+        ['other', '2', 'other', 'Other bookmarks'],
+        ['synced', '3', 'synced', 'Mobile bookmarks']
+    ];
+    for (const [key, id, guid, name] of rootDefaults) {
+        const existing = document.roots[key];
+        document.roots[key] = existing && typeof existing === 'object'
+            ? { ...createBookmarkRoot(id, guid, name), ...existing, children: Array.isArray(existing.children) ? existing.children : [] }
+            : createBookmarkRoot(id, guid, name);
+    }
+    if (!Number.isFinite(Number(document.version))) document.version = 1;
+    return document;
+}
+
+function findLargestBookmarkId(node) {
+    if (!node || typeof node !== 'object') return 3;
+    let largest = Number.parseInt(node.id, 10);
+    if (!Number.isFinite(largest)) largest = 3;
+    for (const child of Array.isArray(node.children) ? node.children : []) {
+        largest = Math.max(largest, findLargestBookmarkId(child));
+    }
+    return largest;
+}
+
+function collectBookmarkUrls(node, result = new Set()) {
+    if (!node || typeof node !== 'object') return result;
+    if (node.type === 'url' && node.url) result.add(String(node.url).trim());
+    for (const child of Array.isArray(node.children) ? node.children : []) collectBookmarkUrls(child, result);
+    return result;
+}
+
+function shouldApplyDefaultBookmarks(profile, settings) {
+    const normalizedSettings = normalizeSettingsSnapshot(settings || {});
+    const scope = normalizedSettings.defaultBookmarkScope;
+    if (scope.mode === 'all') return true;
+    const selectedTags = new Set(scope.tags);
+    const profileTags = normalizeTags(profile?.tags || []);
+    const hasSelectedTag = profileTags.some(tag => selectedTags.has(tag));
+    return scope.mode === 'includeTags' ? hasSelectedTag : !hasSelectedTag;
+}
+
+async function applyDefaultBookmarksToProfile(profile, settings) {
+    const nextProfile = {
+        ...profile,
+        defaultBookmarksAppliedAt: Date.now()
+    };
+    const normalizedSettings = normalizeSettingsSnapshot(settings || {});
+    const defaults = normalizedSettings.defaultBookmarks;
+    if (!defaults.length || !shouldApplyDefaultBookmarks(profile, normalizedSettings)) return nextProfile;
+
+    const bookmarksPath = path.join(DATA_PATH, profile.id, 'browser_data', 'Default', 'Bookmarks');
+    try {
+        await fs.ensureDir(path.dirname(bookmarksPath));
+        let document = {};
+        if (fs.existsSync(bookmarksPath)) {
+            document = await fs.readJson(bookmarksPath).catch(() => ({}));
+        }
+        document = normalizeBookmarksDocument(document);
+        const bookmarkBar = document.roots.bookmark_bar;
+        const existingUrls = collectBookmarkUrls(document.roots);
+        let nextId = Math.max(
+            findLargestBookmarkId(document.roots.bookmark_bar),
+            findLargestBookmarkId(document.roots.other),
+            findLargestBookmarkId(document.roots.synced)
+        );
+        let added = false;
+        for (const bookmark of defaults) {
+            if (existingUrls.has(bookmark.url)) continue;
+            nextId += 1;
+            bookmarkBar.children.push({
+                date_added: chromiumBookmarkTimestamp(),
+                guid: uuidv4(),
+                id: String(nextId),
+                name: bookmark.name,
+                type: 'url',
+                url: bookmark.url
+            });
+            existingUrls.add(bookmark.url);
+            added = true;
+        }
+        if (added) {
+            bookmarkBar.date_modified = chromiumBookmarkTimestamp();
+            // Chromium accepts an empty checksum and rebuilds it on the next write.
+            // Keeping the old checksum after changing the tree would leave it stale.
+            document.checksum = '';
+        }
+        await fs.writeJson(bookmarksPath, document, { spaces: 2 });
+    } catch (error) {
+        console.warn(`[Bookmarks] Failed to initialize defaults for ${profile.id}:`, error.message);
+    }
+    return nextProfile;
 }
 
 function isDirectProxy(proxyStr) {
@@ -2163,7 +2311,10 @@ async function handleApiRequest(method, pathname, body, params, context = {}) {
     // POST /api/profiles - Create with unique name
     if (method === 'POST' && pathname === '/api/profiles') {
         const data = parseApiBody(body);
-        const newProfile = await buildProfileFromInput(data, profiles, settings);
+        const newProfile = await applyDefaultBookmarksToProfile(
+            await buildProfileFromInput(data, profiles, settings),
+            settings
+        );
         profiles.push(newProfile);
         await fs.writeJson(PROFILES_FILE, profiles);
         notifyUIRefresh(); // Notify UI to refresh
@@ -3910,7 +4061,10 @@ ipcMain.handle('update-profile', async (event, updatedProfile) => {
 ipcMain.handle('save-profile', async (event, data) => {
     const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
     const settings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
-    const newProfile = await buildProfileFromInput(data, profiles, settings);
+    const newProfile = await applyDefaultBookmarksToProfile(
+        await buildProfileFromInput(data, profiles, settings),
+        settings
+    );
     profiles.push(newProfile);
     await fs.writeJson(PROFILES_FILE, profiles);
     notifyUIRefresh();
@@ -3993,7 +4147,9 @@ ipcMain.handle('get-settings', async () => {
             enableRemoteDebugging: false,
             enableUaWebglModify: false,
             closeBehavior: CLOSE_BEHAVIOR.TRAY,
-            userExtensions: []
+            userExtensions: [],
+            defaultBookmarks: [],
+            defaultBookmarkScope: { mode: 'all', tags: [] }
         };
     }
     const settings = await fs.readJson(SETTINGS_FILE);
