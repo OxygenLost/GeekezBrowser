@@ -13,9 +13,10 @@ function runPasswordTask(task) {
 const PASSWORDS_KEY = 'geekez_passwords';
 const LEGACY_PASSWORDS_KEY = 'GEEKEZ_PASSWORDS';
 const SYNC_KEY = 'geekez_passwords_sync_pending';
+const API_REVISIONS_KEY = 'geekez_passwords_api_revisions';
 
 async function getPasswords() {
-    const stored = await chrome.storage.local.get([PASSWORDS_KEY, LEGACY_PASSWORDS_KEY]);
+    const stored = await chrome.storage.local.get([PASSWORDS_KEY, LEGACY_PASSWORDS_KEY, API_REVISIONS_KEY]);
     // Migrate the uppercase key if the canonical store has not been created yet.
     const storedPasswords = Array.isArray(stored[PASSWORDS_KEY])
         ? stored[PASSWORDS_KEY]
@@ -37,8 +38,31 @@ async function getPasswords() {
             } catch {}
         }
     }
+    const revisions = { ...stored[API_REVISIONS_KEY] };
+    const apiFields = new Set(['url', 'origin', 'username', 'password', 'name', 'notes', 'twoFactorEnabled', 'twoFactorSecret']);
+    // Import explicit API changes once, including into an intentionally empty vault.
+    for (const seeded of INIT_PASSWORDS) {
+        const update = seeded.apiUpdate;
+        if (!update?.revision || revisions[seeded.id] === update.revision) continue;
+        const incoming = { ...seeded };
+        delete incoming.apiUpdate;
+        const at = passwords.findIndex(entry => entry.id === incoming.id ||
+            (entry.origin === incoming.origin && entry.username === incoming.username));
+        if (at < 0) passwords.push(incoming);
+        else {
+            const fields = {};
+            for (const key of update.fields || []) {
+                if (apiFields.has(key)) fields[key] = incoming[key];
+            }
+            passwords[at] = { ...passwords[at], ...fields, id: incoming.id, updatedAt: incoming.updatedAt };
+            delete passwords[at].apiUpdate;
+        }
+        revisions[incoming.id] = update.revision;
+        changed = true;
+    }
     if (changed) {
-        await chrome.storage.local.set({ [PASSWORDS_KEY]: passwords, [SYNC_KEY]: true });
+        await chrome.storage.local.set({ [PASSWORDS_KEY]: passwords, [SYNC_KEY]: true, [API_REVISIONS_KEY]: revisions });
+        totpCache.clear();
     }
     return passwords;
 }
@@ -57,7 +81,8 @@ async function postApi(endpoint, payload) {
 
 async function syncToElectron(passwords) {
     try {
-        await postApi('/api/passwords/sync', { profileId: PROFILE_ID, passwords });
+        const state = await chrome.storage.local.get(API_REVISIONS_KEY);
+        await postApi('/api/passwords/sync', { profileId: PROFILE_ID, passwords, apiRevisions: state[API_REVISIONS_KEY] || {} });
         await chrome.storage.local.set({ [SYNC_KEY]: false });
     } catch (error) {
         throw new Error('扩展内的修改已保存，但加密文件同步失败：' + error.message);

@@ -168,6 +168,15 @@ const EXTENSION_STORE_CATALOG = [
 
 let activeProcesses = {};
 let launchingProfiles = new Set();
+const profileResourceWrites = new Set();
+let profileApiQueue = Promise.resolve();
+
+function runProfileApiTask(task) {
+    const result = profileApiQueue.then(task);
+    profileApiQueue = result.catch(() => { });
+    return result;
+}
+
 const runtimeProfileLanguageStates = new Map();
 let apiServer = null;
 let apiServerRunning = false;
@@ -531,12 +540,19 @@ function createInternalApiServer() {
                 if (typeof data?.profileId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(data.profileId) || !Array.isArray(data.passwords)) {
                     res.writeHead(400); return res.end(JSON.stringify({ success: false, error: 'profileId and passwords required' }));
                 }
-                const pwFile = require('path').join(DATA_PATH, data.profileId, 'passwords.json');
-                await require('fs-extra').ensureDir(require('path').dirname(pwFile));
-                await writeEncryptedPasswords(pwFile, data.passwords, data.profileId);
+                await runProfileApiTask(async () => {
+                    const pwFile = path.join(DATA_PATH, data.profileId, 'passwords.json');
+                    const existing = await readEncryptedPasswords(pwFile, data.profileId, { strict: true });
+                    if (existing.some(entry => entry.apiUpdate?.revision &&
+                        data.apiRevisions?.[entry.id] !== entry.apiUpdate.revision)) {
+                        throw Object.assign(new Error('API 账号更新尚未导入，请关闭并重新启动环境'), { statusCode: 409 });
+                    }
+                    await fs.ensureDir(path.dirname(pwFile));
+                    await writeEncryptedPasswords(pwFile, data.passwords, data.profileId);
+                });
                 res.writeHead(200); res.end(JSON.stringify({ success: true, count: data.passwords.length }));
             } catch (err) {
-                res.writeHead(500); res.end(JSON.stringify({ success: false, error: err.message }));
+                res.writeHead(err.statusCode || 500); res.end(JSON.stringify({ success: false, error: err.message }));
             }
         } else {
             res.writeHead(404); res.end(JSON.stringify({ success: false, error: 'Endpoint not found' }));
@@ -1458,7 +1474,17 @@ function createBookmarkRoot(id, guid, name) {
     };
 }
 
-function normalizeBookmarksDocument(rawDocument) {
+function normalizeBookmarksDocument(rawDocument, { strict = false } = {}) {
+    if (strict) {
+        const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+        const isBookmark = node => isObject(node) && (node.type === 'folder'
+            ? Array.isArray(node.children) && node.children.every(isBookmark)
+            : node.type === 'url' && typeof node.url === 'string');
+        if (!isObject(rawDocument) || !isObject(rawDocument.roots) ||
+            !Object.values(rawDocument.roots).every(root => root?.type === 'folder' && isBookmark(root))) {
+            throw new Error('Existing bookmark file is invalid; no files were changed');
+        }
+    }
     const document = rawDocument && typeof rawDocument === 'object' ? rawDocument : {};
     if (!document.roots || typeof document.roots !== 'object') document.roots = {};
     const rootDefaults = [
@@ -1488,9 +1514,65 @@ function findLargestBookmarkId(node) {
 
 function collectBookmarkUrls(node, result = new Set()) {
     if (!node || typeof node !== 'object') return result;
-    if (node.type === 'url' && node.url) result.add(String(node.url).trim());
+    if (node.type === 'url' && node.url) {
+        try { result.add(new URL(node.url).href); } catch { result.add(String(node.url).trim()); }
+    }
     for (const child of Array.isArray(node.children) ? node.children : []) collectBookmarkUrls(child, result);
     return result;
+}
+
+function appendProfileBookmarks(document, bookmarks) {
+    const roots = Object.values(document.roots);
+    const existingUrls = new Set();
+    roots.forEach(root => collectBookmarkUrls(root, existingUrls));
+    let nextId = Math.max(3, ...roots.map(findLargestBookmarkId));
+    let added = 0;
+    for (const bookmark of bookmarks) {
+        const url = new URL(bookmark.url).href;
+        if (existingUrls.has(url)) continue;
+        document.roots.bookmark_bar.children.push({
+            date_added: chromiumBookmarkTimestamp(),
+            guid: uuidv4(),
+            id: String(++nextId),
+            name: bookmark.name,
+            type: 'url',
+            url
+        });
+        existingUrls.add(url);
+        added++;
+    }
+    if (added) {
+        document.roots.bookmark_bar.date_modified = chromiumBookmarkTimestamp();
+        // Chromium rebuilds the checksum after the bookmark tree changes.
+        document.checksum = '';
+    }
+    return { added, skipped: bookmarks.length - added };
+}
+
+function passwordAccountKey(entry) {
+    let origin = String(entry?.origin || '').trim();
+    if (!origin && entry?.url) {
+        try { origin = new URL(entry.url).origin; } catch { }
+    }
+    return JSON.stringify([origin, String(entry?.username || '').trim()]);
+}
+
+function appendDefaultPasswords(passwords, defaults) {
+    const existingKeys = new Set(passwords.map(passwordAccountKey));
+    const usedIds = new Set(passwords.map(entry => entry.id));
+    let added = 0;
+    for (const entry of defaults) {
+        const key = passwordAccountKey(entry);
+        if (existingKeys.has(key)) continue;
+        let id = entry.id;
+        while (!id || usedIds.has(id)) id = uuidv4();
+        const now = Date.now();
+        passwords.push({ ...entry, id, createdAt: now, updatedAt: now });
+        existingKeys.add(key);
+        usedIds.add(id);
+        added++;
+    }
+    return added;
 }
 
 function matchesProfileTagScope(profile, scope) {
@@ -1524,34 +1606,7 @@ async function applyDefaultBookmarksToProfile(profile, settings) {
             document = await fs.readJson(bookmarksPath).catch(() => ({}));
         }
         document = normalizeBookmarksDocument(document);
-        const bookmarkBar = document.roots.bookmark_bar;
-        const existingUrls = collectBookmarkUrls(document.roots);
-        let nextId = Math.max(
-            findLargestBookmarkId(document.roots.bookmark_bar),
-            findLargestBookmarkId(document.roots.other),
-            findLargestBookmarkId(document.roots.synced)
-        );
-        let added = false;
-        for (const bookmark of defaults) {
-            if (existingUrls.has(bookmark.url)) continue;
-            nextId += 1;
-            bookmarkBar.children.push({
-                date_added: chromiumBookmarkTimestamp(),
-                guid: uuidv4(),
-                id: String(nextId),
-                name: bookmark.name,
-                type: 'url',
-                url: bookmark.url
-            });
-            existingUrls.add(bookmark.url);
-            added = true;
-        }
-        if (added) {
-            bookmarkBar.date_modified = chromiumBookmarkTimestamp();
-            // Chromium accepts an empty checksum and rebuilds it on the next write.
-            // Keeping the old checksum after changing the tree would leave it stale.
-            document.checksum = '';
-        }
+        appendProfileBookmarks(document, defaults);
         await fs.writeJson(bookmarksPath, document, { spaces: 2 });
     } catch (error) {
         console.warn(`[Bookmarks] Failed to initialize defaults for ${profile.id}:`, error.message);
@@ -1578,39 +1633,7 @@ async function applyDefaultPasswordsToProfile(profile, settings) {
         await fs.ensureDir(path.dirname(pwFile));
         const existing = await readEncryptedPasswords(pwFile, profile.id);
         const passwords = Array.isArray(existing) ? existing.slice() : [];
-        const existingKeys = new Set(passwords.map((entry) => {
-            let origin = String(entry?.origin || '').trim();
-            if (!origin && entry?.url) {
-                try { origin = new URL(String(entry.url)).origin; } catch { }
-            }
-            const username = String(entry?.username || '').trim();
-            return `${origin}\u0000${username}`;
-        }));
-        const usedIds = new Set(passwords.map(entry => String(entry?.id || '').trim()).filter(Boolean));
-        let added = false;
-        for (const entry of defaults) {
-            const key = `${entry.origin}\u0000${entry.username}`;
-            if (existingKeys.has(key)) continue;
-            let id = entry.id;
-            while (usedIds.has(id)) id = uuidv4();
-            usedIds.add(id);
-            const now = Date.now();
-            passwords.push({
-                id,
-                name: entry.name,
-                url: entry.url,
-                origin: entry.origin,
-                username: entry.username,
-                password: entry.password,
-                notes: entry.notes,
-                twoFactorEnabled: entry.twoFactorEnabled,
-                twoFactorSecret: entry.twoFactorSecret,
-                createdAt: now,
-                updatedAt: now
-            });
-            existingKeys.add(key);
-            added = true;
-        }
+        const added = appendDefaultPasswords(passwords, defaults);
         if (added || !fs.existsSync(pwFile)) await writeEncryptedPasswords(pwFile, passwords, profile.id);
     } catch (error) {
         console.warn(`[Password Manager] Failed to initialize defaults for ${profile.id}:`, error.message);
@@ -2427,9 +2450,185 @@ function resolveApiExportProfiles(profiles, params, routeSelector = '') {
     return { profiles: selected, selectedAll: false };
 }
 
-// --- Chrome 密码解密辅助函数 ---
-// 解密 Chrome 主密钥 (平台相关)
+function profileResourceError(message, status = 400) {
+    return Object.assign(new Error(message), { status });
+}
+
+function normalizeApiProfileResources(data) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw profileResourceError('Request body must be a JSON object');
+    }
+    const resources = { passwords: [], bookmarks: [] };
+    const accounts = new Set();
+    for (const field of ['passwords', 'bookmarks']) {
+        if (!hasOwn(data, field)) continue;
+        if (!Array.isArray(data[field])) throw profileResourceError(`${field} must be an array`);
+        resources[field] = data[field].map((item, index) => {
+            const invalid = message => profileResourceError(`${field}[${index}]: ${message}`);
+            if (!item || typeof item !== 'object' || Array.isArray(item)) throw invalid('must be an object');
+            let url;
+            try { url = new URL(typeof item.url === 'string' ? item.url.trim() : ''); }
+            catch { throw invalid('url must be a valid HTTP or HTTPS URL'); }
+            if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+                throw invalid('url must use HTTP or HTTPS without embedded credentials');
+            }
+            if (hasOwn(item, 'name') && typeof item.name !== 'string') throw invalid('name must be a string');
+            if (field === 'bookmarks') return { name: item.name?.trim() || url.hostname, url: url.href };
+            if (typeof item.username !== 'string' || !item.username.trim()) throw invalid('username is required');
+            const patch = { url: url.href, origin: url.origin, username: item.username.trim() };
+            for (const key of ['name', 'password', 'notes', 'twoFactorSecret']) {
+                if (!hasOwn(item, key)) continue;
+                if (typeof item[key] !== 'string') throw invalid(`${key} must be a string`);
+                patch[key] = item[key];
+            }
+            if (hasOwn(item, 'twoFactorEnabled') && typeof item.twoFactorEnabled !== 'boolean') {
+                throw invalid('twoFactorEnabled must be a boolean');
+            }
+            if (hasOwn(item, 'twoFactorEnabled') || hasOwn(item, 'twoFactorSecret')) {
+                patch.twoFactorEnabled = item.twoFactorEnabled ?? Boolean(item.twoFactorSecret?.trim());
+                if (!patch.twoFactorEnabled) patch.twoFactorSecret = '';
+                else if (hasOwn(item, 'twoFactorSecret')) {
+                    try { patch.twoFactorSecret = normalizePresetTotpSecret(item.twoFactorSecret); }
+                    catch (error) { throw invalid(error.message); }
+                }
+            }
+            const key = passwordAccountKey(patch);
+            if (accounts.has(key)) throw invalid('duplicate website origin and username');
+            accounts.add(key);
+            return patch;
+        });
+    }
+    return resources;
+}
+
+function upsertApiPasswords(passwords, patches) {
+    const result = { added: 0, updated: 0, unchanged: 0 };
+    patches.forEach((patch, index) => {
+        const key = passwordAccountKey(patch);
+        const at = passwords.findIndex(entry => passwordAccountKey(entry) === key);
+        const previous = at < 0 ? null : passwords[at];
+        let normalized;
+        try { [normalized] = normalizeDefaultPasswords([{ ...previous, ...patch }]); }
+        catch (error) { throw profileResourceError(`passwords[${index}]: ${error.message}`); }
+        if (previous && Object.keys(normalized).every(field => normalized[field] === previous[field])) {
+            result.unchanged++;
+            return;
+        }
+        const now = Date.now();
+        const entry = {
+            ...previous, ...normalized,
+            createdAt: previous?.createdAt || now,
+            updatedAt: now,
+            // Retain pending fields when several API updates precede the next launch.
+            apiUpdate: {
+                revision: uuidv4(),
+                fields: Array.from(new Set([...(previous?.apiUpdate?.fields || []), ...Object.keys(patch)]))
+            }
+        };
+        if (at < 0) { passwords.push(entry); result.added++; }
+        else { passwords[at] = entry; result.updated++; }
+    });
+    return result;
+}
+
+async function prepareApiProfileResources(profile, resources, settings, isNew) {
+    const files = [];
+    const results = {};
+    const defaults = isNew ? normalizeSettingsSnapshot({ ...settings }) : null;
+    const defaultPasswordSettings = isNew ? await readDefaultPasswordSettings() : null;
+    const defaultPasswords = isNew && matchesProfileTagScope(profile,
+        hasOwn(settings, 'defaultPasswordScope') ? defaults.defaultPasswordScope : defaultPasswordSettings.scope)
+        ? defaultPasswordSettings.passwords : [];
+    const defaultBookmarks = isNew && matchesProfileTagScope(profile, defaults.defaultBookmarkScope)
+        ? defaults.defaultBookmarks : [];
+
+    if (resources.passwords.length || defaultPasswords.length) {
+        const file = path.join(DATA_PATH, profile.id, 'passwords.json');
+        const passwords = await readEncryptedPasswords(file, profile.id, { strict: true });
+        const seeded = appendDefaultPasswords(passwords, defaultPasswords);
+        const result = upsertApiPasswords(passwords, resources.passwords);
+        if (resources.passwords.length) results.passwords = result;
+        if (seeded || result.added || result.updated) {
+            files.push({ file, data: encryptData(Buffer.from(JSON.stringify(passwords)), 'GeekEZ_PW_' + profile.id) });
+        }
+    }
+    if (resources.bookmarks.length || defaultBookmarks.length) {
+        const file = path.join(DATA_PATH, profile.id, 'browser_data', 'Default', 'Bookmarks');
+        const document = fs.existsSync(file)
+            ? normalizeBookmarksDocument(await fs.readJson(file), { strict: true })
+            : normalizeBookmarksDocument({});
+        const result = appendProfileBookmarks(document, resources.bookmarks);
+        const seeded = appendProfileBookmarks(document, defaultBookmarks);
+        if (resources.bookmarks.length) results.bookmarks = result;
+        if (seeded.added || result.added) files.push({ file, data: Buffer.from(JSON.stringify(document, null, 2)) });
+    }
+    return { files, results };
+}
+
+async function commitProfileFiles(files) {
+    const staged = [];
+    const committed = [];
+    try {
+        // Prepare every file before replacing any existing data; restore on I/O failure.
+        for (const entry of files) {
+            const original = fs.existsSync(entry.file) ? await fs.readFile(entry.file) : null;
+            const temporary = `${entry.file}.${uuidv4()}.tmp`;
+            staged.push({ ...entry, original, temporary });
+            await fs.ensureDir(path.dirname(entry.file));
+            await fs.writeFile(temporary, entry.data, { mode: 0o600 });
+        }
+        for (const entry of staged) {
+            await fs.rename(entry.temporary, entry.file);
+            committed.push(entry);
+        }
+    } catch (error) {
+        for (const entry of committed.reverse()) {
+            if (entry.original === null) await fs.remove(entry.file);
+            else await fs.writeFile(entry.file, entry.original);
+        }
+        throw error;
+    } finally {
+        for (const entry of staged) await fs.remove(entry.temporary);
+    }
+}
+
+async function saveApiProfile(body, idOrName = null) {
+    const data = parseApiBody(body);
+    const resources = normalizeApiProfileResources(data);
+    const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
+    const settings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
+    const at = idOrName === null ? -1 : profiles.findIndex(p => p.id === idOrName || p.name === idOrName);
+    if (idOrName !== null && at < 0) throw profileResourceError('Profile not found', 404);
+    const previous = profiles[at] || null;
+    const hasResources = resources.passwords.length > 0 || resources.bookmarks.length > 0;
+    if (previous && hasResources && (activeProcesses[previous.id] || launchingProfiles.has(previous.id))) {
+        throw profileResourceError('Stop the profile before updating passwords or bookmarks', 409);
+    }
+    if (previous && hasResources) profileResourceWrites.add(previous.id);
+    try {
+        const profile = await buildProfileFromInput(data, profiles.filter(p => p !== previous), settings, previous);
+        const { files, results } = await prepareApiProfileResources(profile, resources, settings, !previous);
+        if (!previous) {
+            profile.defaultBookmarksAppliedAt = profile.defaultPasswordsAppliedAt = Date.now();
+            profiles.push(profile);
+        } else profiles[at] = profile;
+        files.push({ file: PROFILES_FILE, data: Buffer.from(JSON.stringify(profiles)) });
+        await commitProfileFiles(files);
+        notifyUIRefresh();
+        return { success: true, profile, remoteDebugPort: settings.enableRemoteDebugging ? profile.debugPort : null, ...results };
+    } finally {
+        if (previous && hasResources) profileResourceWrites.delete(previous.id);
+    }
+}
+
 async function handleApiRequest(method, pathname, body, params, context = {}) {
+    const profileMatch = pathname.match(/^\/api\/profiles\/([^\/]+)$/);
+    if (method === 'POST' && pathname === '/api/profiles') {
+        return runProfileApiTask(() => saveApiProfile(body));
+    }
+    if (method === 'PUT' && profileMatch) {
+        return runProfileApiTask(() => saveApiProfile(body, decodeURIComponent(profileMatch[1])));
+    }
     let profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
     const settings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
 
@@ -2464,46 +2663,10 @@ async function handleApiRequest(method, pathname, body, params, context = {}) {
     }
 
     // GET /api/profiles/:idOrName
-    const profileMatch = pathname.match(/^\/api\/profiles\/([^\/]+)$/);
     if (method === 'GET' && profileMatch) {
         const profile = findProfile(decodeURIComponent(profileMatch[1]));
         if (!profile) return { status: 404, data: { success: false, error: 'Profile not found' } };
         return { success: true, profile: { ...profile, running: !!activeProcesses[profile.id] } };
-    }
-
-    // POST /api/profiles - Create with unique name
-    if (method === 'POST' && pathname === '/api/profiles') {
-        const data = parseApiBody(body);
-        let newProfile = await applyDefaultBookmarksToProfile(
-            await buildProfileFromInput(data, profiles, settings),
-            settings
-        );
-        newProfile = await applyDefaultPasswordsToProfile(newProfile, settings);
-        profiles.push(newProfile);
-        await fs.writeJson(PROFILES_FILE, profiles);
-        notifyUIRefresh(); // Notify UI to refresh
-        return {
-            success: true,
-            profile: newProfile,
-            remoteDebugPort: settings.enableRemoteDebugging ? newProfile.debugPort : null
-        };
-    }
-
-    // PUT /api/profiles/:idOrName - Edit
-    if (method === 'PUT' && profileMatch) {
-        const profile = findProfile(decodeURIComponent(profileMatch[1]));
-        if (!profile) return { status: 404, data: { success: false, error: 'Profile not found' } };
-        const idx = profiles.findIndex(p => p.id === profile.id);
-        const data = parseApiBody(body);
-        const otherProfiles = profiles.filter(p => p.id !== profile.id);
-        profiles[idx] = await buildProfileFromInput(data, otherProfiles, settings, profile);
-        await fs.writeJson(PROFILES_FILE, profiles);
-        notifyUIRefresh();
-        return {
-            success: true,
-            profile: profiles[idx],
-            remoteDebugPort: settings.enableRemoteDebugging ? profiles[idx].debugPort : null
-        };
     }
 
     // DELETE /api/profiles/:idOrName
@@ -3397,7 +3560,7 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
     const manifest = {
         manifest_version: 3,
         name: "GeekEZ Guard",
-        version: "1.2.1",
+        version: "1.2.2",
         description: "Privacy & Password Protection",
         permissions: ["storage", "activeTab"],
         host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
@@ -4711,21 +4874,26 @@ function decryptData(encryptedBuffer, password) {
 }
 
 // --- 密码加密存储辅助函数 ---
-async function readEncryptedPasswords(pwFile, profileId) {
+async function readEncryptedPasswords(pwFile, profileId, { strict = false } = {}) {
     if (!fs.existsSync(pwFile)) return [];
     try {
         const encrypted = await fs.readFile(pwFile);
         const decrypted = decryptData(encrypted, 'GeekEZ_PW_' + profileId);
-        return JSON.parse(decrypted.toString('utf8'));
+        const passwords = JSON.parse(decrypted.toString('utf8'));
+        if (!Array.isArray(passwords) || passwords.some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry))) {
+            throw new Error('Invalid password store');
+        }
+        return passwords;
     } catch (e) {
         try {
             // 兼容之前明文保存的 JSON，透明升级到加密
             const plain = await fs.readJson(pwFile);
-            if (Array.isArray(plain)) {
-                writeEncryptedPasswords(pwFile, plain, profileId).catch(() => { });
+            if (Array.isArray(plain) && plain.every(entry => entry && typeof entry === 'object' && !Array.isArray(entry))) {
+                if (!strict) writeEncryptedPasswords(pwFile, plain, profileId).catch(() => { });
                 return plain;
             }
         } catch (e2) { }
+        if (strict) throw new Error('密码库读取失败，未覆盖已有文件');
     }
     return [];
 }
@@ -5172,6 +5340,9 @@ ipcMain.handle('export-data', async (e, type) => {
 
 // --- 核心启动逻辑 ---
 const launchProfileHandler = async (event, profileId, watermarkStyle, preferredLang, launchOptions = {}) => {
+    if (profileResourceWrites.has(profileId)) {
+        throw profileResourceError('Profile data is being updated; retry launching shortly', 409);
+    }
     const sender = event.sender;
     const launchArgsOverride = normalizeLaunchOverrideArgs(launchOptions.launchArgsOverride || []);
     const progressTitle = preferredLang === 'en' ? 'Launching Profile' : '正在启动环境';
