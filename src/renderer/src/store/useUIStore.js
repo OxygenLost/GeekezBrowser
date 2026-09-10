@@ -93,7 +93,8 @@ export const useUIStore = defineStore('ui', () => {
     const openSettings = () => { settingsModalVisible.value = true; };
     const closeSettings = () => { settingsModalVisible.value = false; };
 
-    const setTheme = (newTheme) => {
+    const setTheme = (newTheme, persist = true) => {
+        if (!['geek', 'light', 'dark', 'tech-gray'].includes(newTheme)) return;
         theme.value = newTheme;
         document.body.setAttribute('data-theme', newTheme);
         localStorage.setItem('geekez_theme', newTheme);
@@ -106,17 +107,19 @@ export const useUIStore = defineStore('ui', () => {
         };
         const colors = themeColors[newTheme] || themeColors['geek'];
         ipcService.setTitleBarColor(colors);
+        if (persist) ipcService.saveSettings({ theme: newTheme })
+            .catch(e => console.warn('[UIStore] Failed to persist theme:', e));
     };
 
-    const toggleLang = () => {
-        const newLang = lang.value === 'cn' ? 'en' : 'cn';
+    const setLanguage = (newLang, persist = true) => {
+        if (!['cn', 'en'].includes(newLang)) return;
         lang.value = newLang;
+        window.curLang = newLang;
         localStorage.setItem('geekez_lang', newLang);
-        ipcService.getSettings()
-            .then((settings) => ipcService.saveSettings({ ...(settings || {}), lang: newLang }))
+        if (persist) ipcService.saveSettings({ lang: newLang })
             .catch((e) => console.warn('[UIStore] Failed to persist language setting:', e));
-        location.reload();
     };
+    const toggleLang = () => setLanguage(lang.value === 'cn' ? 'en' : 'cn');
 
     // Dialog Actions
     const showAlert = (msg, showBtn = true) => {
@@ -219,6 +222,7 @@ export const useUIStore = defineStore('ui', () => {
         openSettings,
         closeSettings,
         setTheme,
+        setLanguage,
         toggleLang,
         showAlert,
         showConfirm,

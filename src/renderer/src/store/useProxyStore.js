@@ -73,7 +73,8 @@ export const useProxyStore = defineStore('proxy', () => {
 
     const saveSettings = async () => {
         try {
-            const payload = JSON.parse(JSON.stringify(settings.value || {}));
+            const fields = ['preProxies', 'subscriptions', 'mode', 'notify', 'selectedId', 'enablePreProxy'];
+            const payload = JSON.parse(JSON.stringify(Object.fromEntries(fields.map(key => [key, settings.value[key]]))));
             await ipcService.saveSettings(payload);
         } catch (e) {
             console.error('[ProxyStore] Failed to save settings:', e);

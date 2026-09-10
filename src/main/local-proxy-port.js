@@ -25,7 +25,7 @@ function closeUdpSocket(socket) {
     });
 }
 
-function listenTcp(server, host) {
+function listenTcp(server, host, port = 0) {
     return new Promise((resolve, reject) => {
         const onError = (error) => {
             server.removeListener('listening', onListening);
@@ -37,7 +37,7 @@ function listenTcp(server, host) {
         };
         server.once('error', onError);
         server.once('listening', onListening);
-        server.listen({ host, port: 0, exclusive: true });
+        server.listen({ host, port, exclusive: true });
     });
 }
 
@@ -62,12 +62,18 @@ async function allocateLocalProxyPort(options = {}) {
     const maxAttempts = Number.isInteger(options.maxAttempts) ? options.maxAttempts : 20;
     let lastError = null;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // Windows can keep a just-closed UDP endpoint in a transient state. Try a
+    // larger pool of OS-assigned ports and avoid reserving TCP and UDP sockets
+    // on separate ephemeral ports.
+    const attempts = process.platform === 'win32' ? Math.max(maxAttempts, 60) : maxAttempts;
+    for (let attempt = 0; attempt < attempts; attempt++) {
         const tcpServer = net.createServer();
         let udpSocket = null;
         try {
             const port = await listenTcp(tcpServer, host);
-            udpSocket = dgram.createSocket('udp4');
+            // Reuse is needed by the Windows socket layer when a previous Xray
+            // process has just released the same ephemeral endpoint.
+            udpSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
             await bindUdp(udpSocket, host, port);
 
             await closeUdpSocket(udpSocket);
@@ -80,7 +86,28 @@ async function allocateLocalProxyPort(options = {}) {
         }
     }
 
-    const error = new Error(`Unable to allocate a local TCP/UDP proxy port after ${maxAttempts} attempts`);
+    // Some Windows builds allocate a UDP endpoint first and reject a later
+    // TCP bind on the same ephemeral port. Try the reverse reservation order
+    // before reporting that the local proxy port is unavailable.
+    for (let attempt = 0; attempt < attempts; attempt++) {
+        const udpSocket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+        let tcpServer = null;
+        try {
+            await bindUdp(udpSocket, host, 0);
+            const port = udpSocket.address().port;
+            tcpServer = net.createServer();
+            await listenTcp(tcpServer, host, port);
+            await closeTcpServer(tcpServer);
+            await closeUdpSocket(udpSocket);
+            return port;
+        } catch (error) {
+            lastError = error;
+            await closeTcpServer(tcpServer);
+            await closeUdpSocket(udpSocket);
+        }
+    }
+
+    const error = new Error(`Unable to allocate a local TCP/UDP proxy port after ${attempts} attempts`);
     error.code = 'LOCAL_PROXY_PORT_UNAVAILABLE';
     error.cause = lastError;
     throw error;

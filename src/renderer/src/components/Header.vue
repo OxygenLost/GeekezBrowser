@@ -268,7 +268,7 @@ const toggleLang = () => {
 };
 
 onMounted(() => {
-    uiStore.setTheme(uiStore.theme);
+    uiStore.setTheme(uiStore.theme, false);
     ipcService.getAppInfo()
         .then((info) => {
             if (info && info.version) {

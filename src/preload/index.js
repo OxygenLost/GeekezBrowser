@@ -17,6 +17,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onProfileStatus: (callback) => ipcRenderer.on('profile-status', (event, data) => callback(data)),
     // API events
     onRefreshProfiles: (callback) => ipcRenderer.on('refresh-profiles', () => callback()),
+    onConfigSyncStatus: (callback) => {
+        const listener = (event, status) => callback(status);
+        ipcRenderer.on('config-sync-status', listener);
+        return () => ipcRenderer.removeListener('config-sync-status', listener);
+    },
+    onSyncSettingsApplied: (callback) => {
+        const listener = (event, settings) => callback(settings);
+        ipcRenderer.on('sync-settings-applied', listener);
+        return () => ipcRenderer.removeListener('sync-settings-applied', listener);
+    },
     onApiLaunchProfile: (callback) => ipcRenderer.on('api-launch-profile', (event, id) => callback(id)),
     onExtensionInstallProgress: (callback) => ipcRenderer.on('extension-install-progress', (event, payload) => callback(payload)),
     onProfileLaunchProgress: (callback) => ipcRenderer.on('profile-launch-progress', (event, payload) => callback(payload))

@@ -9,6 +9,11 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/main/index.js'),
+          'sync-format': resolve(__dirname, 'src/main/sync-format.js'),
+          'sync-revisions': resolve(__dirname, 'src/main/sync-revisions.js'),
+          'webdav-store': resolve(__dirname, 'src/main/webdav-store.js'),
+          'webdav-sync': resolve(__dirname, 'src/main/webdav-sync.js'),
+          'profile-sync': resolve(__dirname, 'src/main/profile-sync.js'),
           'chromium-path': resolve(__dirname, 'src/main/chromium-path.js'),
           'close-behavior': resolve(__dirname, 'src/main/close-behavior.js'),
           'native-glass': resolve(__dirname, 'src/main/native-glass.js'),

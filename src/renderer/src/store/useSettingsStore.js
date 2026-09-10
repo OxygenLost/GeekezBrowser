@@ -110,30 +110,22 @@ export const useSettingsStore = defineStore('settings', {
 
         async toggleRemoteDebugging(enabled) {
             this.enableRemoteDebugging = enabled;
-            const settings = await ipcService.getSettings();
-            settings.enableRemoteDebugging = enabled;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ enableRemoteDebugging: enabled });
         },
 
         async toggleCustomArgs(enabled) {
             this.enableCustomArgs = enabled;
-            const settings = await ipcService.getSettings();
-            settings.enableCustomArgs = enabled;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ enableCustomArgs: enabled });
         },
 
         async toggleUaWebglModify(enabled) {
             this.enableUaWebglModify = enabled;
-            const settings = await ipcService.getSettings();
-            settings.enableUaWebglModify = enabled;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ enableUaWebglModify: enabled });
         },
 
         async toggleApiServer(enabled) {
             this.enableApiServer = enabled;
-            const settings = await ipcService.getSettings();
-            settings.enableApiServer = enabled;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ enableApiServer: enabled });
 
             if (enabled) {
                 this.apiStarting = true;
@@ -152,16 +144,12 @@ export const useSettingsStore = defineStore('settings', {
 
         async setCloseBehavior(mode) {
             this.closeBehavior = mode === 'quit' ? 'quit' : 'tray';
-            const settings = await ipcService.getSettings();
-            settings.closeBehavior = this.closeBehavior;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ closeBehavior: this.closeBehavior });
         },
 
         async saveApiPort(port) {
             this.apiPort = port;
-            const settings = await ipcService.getSettings();
-            settings.apiPort = port;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ apiPort: port });
 
             if (this.enableApiServer) {
                 await settingService.stopApiServer();
@@ -179,9 +167,7 @@ export const useSettingsStore = defineStore('settings', {
             const nextStyle = style === 'banner' || style === 'off' ? style : 'enhanced';
             this.watermarkStyle = nextStyle;
             localStorage.setItem('geekez_watermark_style', nextStyle);
-            const settings = await ipcService.getSettings();
-            settings.watermarkStyle = nextStyle;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ watermarkStyle: nextStyle });
         },
 
         async saveDefaultBookmarks(bookmarks, scope) {
@@ -197,10 +183,7 @@ export const useSettingsStore = defineStore('settings', {
                     .map(tag => String(tag || '').trim())
                     .filter(Boolean)))
             };
-            const settings = (await ipcService.getSettings()) || {};
-            settings.defaultBookmarks = normalizedBookmarks;
-            settings.defaultBookmarkScope = normalizedScope;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ defaultBookmarks: normalizedBookmarks, defaultBookmarkScope: normalizedScope });
             this.defaultBookmarks = normalizedBookmarks;
             this.defaultBookmarkScope = normalizedScope;
         },
@@ -223,10 +206,7 @@ export const useSettingsStore = defineStore('settings', {
                     .map(tag => String(tag || '').trim())
                     .filter(Boolean)))
             };
-            const settings = (await ipcService.getSettings()) || {};
-            settings.defaultPasswords = normalizedPasswords;
-            settings.defaultPasswordScope = normalizedScope;
-            await ipcService.saveSettings(settings);
+            await ipcService.saveSettings({ defaultPasswords: normalizedPasswords, defaultPasswordScope: normalizedScope });
             this.defaultPasswords = normalizedPasswords;
             this.defaultPasswordScope = normalizedScope;
         },

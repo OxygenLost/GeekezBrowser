@@ -1,6 +1,6 @@
 <template>
     <div id="alertModal" class="modal-overlay" :class="{ active: uiStore.alertModalVisible }" style="z-index: 2500;">
-        <div class="modal-content" style="width: 350px; text-align: center;">
+        <div class="modal-content" style="width: 350px; max-width: calc(100vw - 32px); text-align: center;">
             <div class="modal-header" style="justify-content: center; border: none;">
                 <span style="color: var(--accent); font-size: 30px;">ℹ</span>
             </div>

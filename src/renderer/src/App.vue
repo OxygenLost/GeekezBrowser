@@ -36,7 +36,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import Header from './components/Header.vue';
 import Toolbar from './components/Toolbar.vue';
 import ProfileList from './components/ProfileList.vue';
@@ -54,6 +54,7 @@ import HelpModal from './components/HelpModal.vue';
 import InputModal from './components/InputModal.vue';
 import ProgressModal from './components/ProgressModal.vue';
 import { profileService } from './services/profile.service';
+import { ipcService } from './services/ipc.service';
 import { useUIStore } from './store/useUIStore';
 import { useProxyStore } from './store/useProxyStore';
 import { useSettingsStore } from './store/useSettingsStore';
@@ -70,6 +71,8 @@ window.settingsStore = settingsStore;
 window.profileStore = profileStore;
 const showSplash = ref(true);
 const isFadingOut = ref(false);
+let unsubscribeSync;
+onUnmounted(() => unsubscribeSync?.());
 
 onMounted(async () => {
     console.log('[App] Mounted, starting initialization...');
@@ -86,6 +89,15 @@ onMounted(async () => {
 
     // 2. 异步执行初始化
     try {
+        unsubscribeSync = window.electronAPI?.onSyncSettingsApplied?.(async settings => {
+            uiStore.setTheme(settings.theme, false);
+            uiStore.setLanguage(settings.lang, false);
+            await settingsStore.loadSettings();
+            await proxyStore.loadSettings();
+        });
+        const saved = await ipcService.getSettings();
+        uiStore.setTheme(saved?.theme || uiStore.theme, !saved?.theme);
+        uiStore.setLanguage(saved?.lang || uiStore.lang, !saved?.lang);
         console.log('[App] Initializing service listeners...');
         profileService.onStatusChange(({ id, status }) => {
             if (window.profileStore) {

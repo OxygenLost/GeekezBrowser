@@ -271,262 +271,7 @@
                     </div>
                 </div>
 
-                <!-- Advanced Tab -->
-                <div v-if="settingsStore.activeTab === 'advanced'" class="settings-section">
-                    <h3 style="margin-bottom:15px; color:var(--accent);" data-i18n="settingsAdvTitle">{{ $t('settingsAdvTitle') }}</h3>
-
-                    <!-- Developer Features - Unified Tech Style -->
-                    <div style="margin-bottom: 25px;">
-                        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
-                            <div style="width:4px; height:20px; background:linear-gradient(180deg, var(--accent), #7c3aed); border-radius:2px;"></div>
-                            <h4 style="margin:0; color:var(--text-primary); font-size:15px; font-weight:600; letter-spacing:0.5px;"
-                                data-i18n="devFeaturesTitle">
-                                {{ $t('devFeaturesTitle') }}
-                            </h4>
-                        </div>
-
-                        <div style="border:1px solid var(--border); border-radius:12px; padding:4px; background:var(--card-bg);">
-                            <!-- UA/WebGL Customize Toggle -->
-                            <label class="dev-toggle-item" style="display:flex; align-items:center; gap:14px; padding:14px 16px; cursor:pointer; border-radius:8px; transition:all 0.2s;">
-                                <div class="toggle-switch" style="position:relative; width:44px; height:24px; flex-shrink:0;">
-                                    <input type="checkbox" :checked="settingsStore.enableUaWebglModify"
-                                        style="opacity:0; width:0; height:0; position:absolute;"
-                                        @change="e => settingsStore.toggleUaWebglModify(e.target.checked)">
-                                    <div class="toggle-track" :style="{ background: settingsStore.enableUaWebglModify ? 'var(--accent)' : 'var(--border)' }"
-                                        style="position:absolute; inset:0; border-radius:12px; transition:0.3s;">
-                                    </div>
-                                    <div class="toggle-knob" :style="{ left: settingsStore.enableUaWebglModify ? '22px' : '2px' }"
-                                        style="position:absolute; top:2px; width:20px; height:20px; background:#fff; border-radius:50%; transition:0.3s; box-shadow:0 2px 4px rgba(0,0,0,0.2);">
-                                    </div>
-                                </div>
-                                <div style="flex:1;">
-                                    <div style="font-size:13px; font-weight:500; color:var(--text-primary);"
-                                        data-i18n="uaWebglToggle">{{ $t('uaWebglToggle') }}</div>
-                                    <div style="font-size:11px; color:var(--text-secondary); opacity:0.8;"
-                                        data-i18n="uaWebglToggleHint">{{ $t('uaWebglToggleHint') }}</div>
-                                    <div style="font-size:11px; color:#ffb3b3; margin-top:4px;"
-                                        data-i18n="uaWebglToggleWarn">{{ $t('uaWebglToggleWarn') }}</div>
-                                </div>
-                            </label>
-
-                            <div style="height:1px; background:var(--border); margin:0 16px;"></div>
-
-                            <!-- Remote Debugging Toggle -->
-                            <label class="dev-toggle-item" style="display:flex; align-items:center; gap:14px; padding:14px 16px; cursor:pointer; border-radius:8px; transition:all 0.2s;">
-                                <div class="toggle-switch" style="position:relative; width:44px; height:24px; flex-shrink:0;">
-                                    <input type="checkbox" :checked="settingsStore.enableRemoteDebugging"
-                                        style="opacity:0; width:0; height:0; position:absolute;"
-                                        @change="e => settingsStore.toggleRemoteDebugging(e.target.checked)">
-                                    <div class="toggle-track" :style="{ background: settingsStore.enableRemoteDebugging ? 'var(--accent)' : 'var(--border)' }"
-                                        style="position:absolute; inset:0; border-radius:12px; transition:0.3s;">
-                                    </div>
-                                    <div class="toggle-knob" :style="{ left: settingsStore.enableRemoteDebugging ? '22px' : '2px' }"
-                                        style="position:absolute; top:2px; width:20px; height:20px; background:#fff; border-radius:50%; transition:0.3s; box-shadow:0 2px 4px rgba(0,0,0,0.2);">
-                                    </div>
-                                </div>
-                                <div style="flex:1;">
-                                    <div style="font-size:13px; font-weight:500; color:var(--text-primary);"
-                                        data-i18n="debugToggle">{{ $t('debugToggle') }}</div>
-                                    <div style="font-size:11px; color:var(--text-secondary); opacity:0.8;"
-                                        data-i18n="debugToggleHint">{{ $t('debugToggleHint') }}</div>
-                                </div>
-                            </label>
-
-                            <div style="height:1px; background:var(--border); margin:0 16px;"></div>
-
-                            <!-- Custom Args Toggle -->
-                            <label class="dev-toggle-item" style="display:flex; align-items:center; gap:14px; padding:14px 16px; cursor:pointer; border-radius:8px; transition:all 0.2s;">
-                                <div class="toggle-switch" style="position:relative; width:44px; height:24px; flex-shrink:0;">
-                                    <input type="checkbox" :checked="settingsStore.enableCustomArgs"
-                                        style="opacity:0; width:0; height:0; position:absolute;"
-                                        @change="e => settingsStore.toggleCustomArgs(e.target.checked)">
-                                    <div class="toggle-track" :style="{ background: settingsStore.enableCustomArgs ? 'var(--accent)' : 'var(--border)' }"
-                                        style="position:absolute; inset:0; border-radius:12px; transition:0.3s;">
-                                    </div>
-                                    <div class="toggle-knob" :style="{ left: settingsStore.enableCustomArgs ? '22px' : '2px' }"
-                                        style="position:absolute; top:2px; width:20px; height:20px; background:#fff; border-radius:50%; transition:0.3s; box-shadow:0 2px 4px rgba(0,0,0,0.2);">
-                                    </div>
-                                </div>
-                                <div style="flex:1;">
-                                    <div style="font-size:13px; font-weight:500; color:var(--text-primary);"
-                                        data-i18n="argsToggle">{{ $t('argsToggle') }}</div>
-                                    <div style="font-size:11px; color:var(--text-secondary); opacity:0.8;"
-                                        data-i18n="argsToggleHint">{{ $t('argsToggleHint') }}</div>
-                                </div>
-                            </label>
-
-                            <div style="height:1px; background:var(--border); margin:0 16px;"></div>
-
-                            <!-- API Server Toggle -->
-                            <label class="dev-toggle-item" style="display:flex; align-items:center; gap:14px; padding:14px 16px; cursor:pointer; border-radius:8px; transition:all 0.2s;">
-                                <div class="toggle-switch" style="position:relative; width:44px; height:24px; flex-shrink:0;">
-                                    <input type="checkbox" :checked="settingsStore.enableApiServer"
-                                        style="opacity:0; width:0; height:0; position:absolute;"
-                                        @change="e => settingsStore.toggleApiServer(e.target.checked)">
-                                    <div class="toggle-track" :style="{ background: settingsStore.enableApiServer ? 'var(--accent)' : 'var(--border)' }"
-                                        style="position:absolute; inset:0; border-radius:12px; transition:0.3s;">
-                                    </div>
-                                    <div class="toggle-knob" :style="{ left: settingsStore.enableApiServer ? '22px' : '2px' }"
-                                        style="position:absolute; top:2px; width:20px; height:20px; background:#fff; border-radius:50%; transition:0.3s; box-shadow:0 2px 4px rgba(0,0,0,0.2);">
-                                    </div>
-                                </div>
-                                <div style="flex:1;">
-                                    <div style="font-size:13px; font-weight:500; color:var(--text-primary);"
-                                        data-i18n="apiToggle">{{ $t('apiToggle') }}</div>
-                                    <div style="font-size:11px; color:var(--text-secondary); opacity:0.8;"
-                                        data-i18n="apiToggleHint">{{ $t('apiToggleHint') }}</div>
-                                </div>
-                                <span v-if="settingsStore.apiStarting"
-                                    style="font-size:10px; padding:3px 8px; background:rgba(243,156,18,0.18); color:#f39c12; border-radius:10px; font-weight:600;">● {{ $t('apiStarting') }}</span>
-                                <span v-else-if="settingsStore.apiRunning"
-                                    style="font-size:10px; padding:3px 8px; background:rgba(76,175,80,0.2); color:#4CAF50; border-radius:10px; font-weight:500;">● Live</span>
-                            </label>
-
-                            <!-- API Port Config (shown when enabled) -->
-                            <div v-if="settingsStore.enableApiServer"
-                                style="padding:12px 16px; margin:4px 12px 12px; background:var(--input-bg); border-radius:8px; border:1px solid var(--border);">
-                                <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
-                                    <code style="font-size:12px; color:var(--accent);">http://localhost:{{ settingsStore.apiPort }}</code>
-                                    <input type="number" v-model.number="tempApiPort" min="1024" max="65535"
-                                        style="width:80px; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--input-bg); color:var(--text-primary); font-size:12px;">
-                                    <button class="outline" @click="handleSaveApiPort" :disabled="settingsStore.apiStarting"
-                                        style="padding:6px 14px; font-size:11px;">Apply</button>
-                                    <a href="#" @click.prevent="handleOpenApiDocs"
-                                        style="font-size:11px; color:var(--accent); margin-left:auto;"
-                                        data-i18n="apiDocs">📄 Docs</a>
-                                </div>
-                                <div v-if="settingsStore.apiStarting"
-                                    style="margin-top:10px; font-size:11px; color:var(--text-secondary);">
-                                    {{ $t('apiStartingHint') }}
-                                </div>
-                            </div>
-
-                            <div style="height:1px; background:var(--border); margin:0 16px;"></div>
-
-                            <!-- Window Close Behavior -->
-                            <div style="padding:14px 16px;">
-                                <div style="font-size:13px; font-weight:500; color:var(--text-primary);"
-                                    data-i18n="closeBehaviorTitle">{{ $t('closeBehaviorTitle') }}</div>
-                                <div style="font-size:11px; color:var(--text-secondary); opacity:0.8; margin-top:4px;"
-                                    data-i18n="closeBehaviorHint">{{ $t('closeBehaviorHint') }}</div>
-                                <div style="margin-top:8px;">
-                                    <select :value="settingsStore.closeBehavior"
-                                        style="width:100%; max-width:260px; margin:0; font-size:12px; padding:7px 10px;"
-                                        @change="(e) => settingsStore.setCloseBehavior(e.target.value)">
-                                        <option value="tray" data-i18n="closeBehaviorTray">{{ $t('closeBehaviorTray') }}</option>
-                                        <option value="quit" data-i18n="closeBehaviorQuit">{{ $t('closeBehaviorQuit') }}</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Watermark Style Section -->
-                    <div style="margin-bottom: 25px;">
-                        <h4 style="margin-bottom:10px; color:var(--text-primary); font-size:14px;"
-                            data-i18n="watermarkTitle">{{ $t('watermarkTitle') }}</h4>
-                        <p style="font-size:12px; opacity:0.7; margin-bottom:15px;" data-i18n="watermarkDesc">
-                            {{ $t('watermarkDesc') }}
-                        </p>
-
-                        <div style="display:flex; flex-direction:column; gap:12px;">
-                            <label :style="{ borderColor: settingsStore.watermarkStyle === 'off' ? 'var(--accent)' : 'var(--border)' }"
-                                style="display:flex; align-items:flex-start; gap:10px; padding:12px; border:1px solid; border-radius:6px; cursor:pointer; transition:0.2s;">
-                                <input type="radio" name="watermarkStyle" value="off"
-                                    style="margin-top:3px; width:auto; cursor:pointer;"
-                                    :checked="settingsStore.watermarkStyle === 'off'"
-                                    @change="settingsStore.saveWatermarkStyle('off')">
-                                <div style="flex:1;">
-                                    <div style="font-weight:bold; margin-bottom:5px; color:var(--text-primary);"
-                                        data-i18n="watermarkOffLabel">
-                                        {{ $t('watermarkOffLabel') }}
-                                    </div>
-                                    <div style="font-size:11px; color:var(--text-secondary); line-height:1.5;"
-                                        data-i18n="watermarkOffDesc">
-                                        {{ $t('watermarkOffDesc') }}
-                                    </div>
-                                </div>
-                            </label>
-
-                            <!-- 方案5: 增强水印 (默认) -->
-                            <label :style="{ borderColor: settingsStore.watermarkStyle === 'enhanced' ? 'var(--accent)' : 'var(--border)' }"
-                                style="display:flex; align-items:flex-start; gap:10px; padding:12px; border:1px solid; border-radius:6px; cursor:pointer; transition:0.2s;">
-                                <input type="radio" name="watermarkStyle" value="enhanced"
-                                    style="margin-top:3px; width:auto; cursor:pointer;"
-                                    :checked="settingsStore.watermarkStyle === 'enhanced'"
-                                    @change="settingsStore.saveWatermarkStyle('enhanced')">
-                                <div style="flex:1;">
-                                    <div style="font-weight:bold; margin-bottom:5px; color:var(--text-primary);"
-                                        data-i18n="watermarkEnhancedLabel">
-                                        {{ $t('watermarkEnhancedLabel') }}
-                                    </div>
-                                    <div style="font-size:11px; color:var(--text-secondary); line-height:1.5;"
-                                        data-i18n="watermarkEnhancedDesc">
-                                        {{ $t('watermarkEnhancedDesc') }}
-                                    </div>
-                                </div>
-                            </label>
-
-                            <!-- 方案1: 顶部横幅 -->
-                            <label :style="{ borderColor: settingsStore.watermarkStyle === 'banner' ? 'var(--accent)' : 'var(--border)' }"
-                                style="display:flex; align-items:flex-start; gap:10px; padding:12px; border:1px solid; border-radius:6px; cursor:pointer; transition:0.2s;">
-                                <input type="radio" name="watermarkStyle" value="banner"
-                                    style="margin-top:3px; width:auto; cursor:pointer;"
-                                    :checked="settingsStore.watermarkStyle === 'banner'"
-                                    @change="settingsStore.saveWatermarkStyle('banner')">
-                                <div style="flex:1;">
-                                    <div style="font-weight:bold; margin-bottom:5px; color:var(--text-primary);"
-                                        data-i18n="watermarkBannerLabel">
-                                        {{ $t('watermarkBannerLabel') }}
-                                    </div>
-                                    <div style="font-size:11px; color:var(--text-secondary); line-height:1.5;"
-                                        data-i18n="watermarkBannerDesc">
-                                        {{ $t('watermarkBannerDesc') }}
-                                    </div>
-                                </div>
-                            </label>
-                        </div>
-                    </div>
-
-                    <!-- Data Directory Section -->
-                    <div style="margin-bottom: 25px;">
-                        <h4 style="margin-bottom:10px; color:var(--text-primary); font-size:14px;"
-                            data-i18n="dataPathTitle">{{ $t('dataPathTitle') }}</h4>
-                        <p style="font-size:12px; opacity:0.7; margin-bottom:15px;" data-i18n="dataPathDesc">
-                            {{ $t('dataPathDesc') }}
-                        </p>
-
-                        <div style="background:rgba(0,0,0,0.2); border:1px solid var(--border); border-radius:8px; padding:15px;">
-                            <div style="margin-bottom:12px;">
-                                <label style="font-size:11px; opacity:0.6; margin-bottom:5px; display:block;"
-                                    data-i18n="dataPathCurrent">{{ $t('dataPathCurrent') }}</label>
-                                <div id="currentDataPath"
-                                    style="font-size:12px; font-family:monospace; background:rgba(0,0,0,0.3); padding:8px 12px; border-radius:6px; word-break:break-all; color:var(--accent);">
-                                    {{ settingsStore.currentDataPath || 'Loading...' }}
-                                </div>
-                            </div>
-
-                            <div style="display:flex; gap:10px; flex-wrap:wrap;">
-                                <button class="outline" @click="handleSelectDataDirectory" style="flex:1; min-width:120px;"
-                                    data-i18n="dataPathBrowse">
-                                    {{ $t('dataPathBrowse') }}
-                                </button>
-                                <button v-if="!settingsStore.isDefaultDataPath" class="outline" @click="handleResetDataDirectory"
-                                    style="flex:1; min-width:120px;" data-i18n="dataPathReset">
-                                    {{ $t('dataPathReset') }}
-                                </button>
-                            </div>
-
-                            <div v-if="showRestartWarning" style="margin-top:12px; padding:10px; background:rgba(255,193,7,0.1); border:1px solid rgba(255,193,7,0.3); border-radius:6px;">
-                                <div style="display:flex; align-items:center; gap:8px;">
-                                    <span style="font-size:16px;">⚠️</span>
-                                    <span style="font-size:11px; color:var(--warning);"
-                                        data-i18n="dataPathRestart">{{ $t('dataPathRestart') }}</span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+                <AdvancedSettings v-if="uiStore.settingsModalVisible && settingsStore.activeTab === 'advanced'" />
             </div>
 
             <div class="modal-footer">
@@ -542,12 +287,11 @@ import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { settingService } from '../services/setting.service';
 import { ipcService } from '../services/ipc.service';
+import AdvancedSettings from './AdvancedSettings.vue';
 
 const uiStore = useUIStore();
 const settingsStore = useSettingsStore();
 
-const tempApiPort = ref(12138);
-const showRestartWarning = ref(false);
 const showStoreSearch = ref(false);
 const storeSearchQuery = ref('');
 const storeSearchResults = ref([]);
@@ -610,10 +354,6 @@ onMounted(async () => {
 watch(() => uiStore.settingsModalVisible, (visible) => {
     if (visible) loadProfileOptions();
 });
-
-watch(() => settingsStore.apiPort, (newVal) => {
-    tempApiPort.value = newVal;
-}, { immediate: true });
 
 const handleSelectExtension = async () => {
     const path = await settingService.selectExtensionFolder();
@@ -948,53 +688,12 @@ const toggleProfileCard = async (ext, profileId) => {
     }
 };
 
-const handleSaveApiPort = async () => {
-    if (tempApiPort.value < 1024 || tempApiPort.value > 65535) {
-        uiStore.showAlert(window.t('apiPortInvalid'));
-        return;
-    }
-    await settingsStore.saveApiPort(tempApiPort.value);
-    uiStore.showAlert(window.t('apiPortSaved'));
-};
-
-const handleOpenApiDocs = () => {
-    ipcService.openUrl('https://browser.geekez.net/doc.html#doc-api');
-};
-
-const handleSelectDataDirectory = async () => {
-    const path = await settingService.selectDataDirectory();
-    if (!path) return;
-
-    uiStore.showConfirm(window.t('dataPathConfirmMigrate'), async () => {
-        uiStore.showAlert(window.t('dataPathMigrating'), false);
-        try {
-            const res = await settingService.setDataDirectory(path, true);
-            if (res.success) {
-                showRestartWarning.value = true;
-                uiStore.showAlert(window.t('dataPathSuccess'));
-            } else {
-                uiStore.showAlert(window.t('dataPathError') + res.error);
-            }
-        } catch (e) {
-            uiStore.showAlert(window.t('dataPathError') + e.message);
-        }
-    });
-};
-
-const handleResetDataDirectory = async () => {
-    uiStore.showConfirm(window.t('dataPathConfirmReset'), async () => {
-        const res = await settingService.resetDataDirectory();
-        if (res.success) {
-            showRestartWarning.value = true;
-            uiStore.showAlert(window.t('dataPathResetSuccess'));
-        }
-    });
-};
-
-
 </script>
 
 <style scoped>
+#settingsModal .modal-content { width: 660px; max-width: calc(100vw - 32px); }
+#settingsModal .tab-header { flex-wrap: wrap; flex-shrink: 0; }
+#settingsModal .tab-btn { font-size: 12px; padding: 12px 10px; white-space: normal; text-align: center; }
 .ext-item {
     display: flex;
     justify-content: space-between;
@@ -1004,10 +703,6 @@ const handleResetDataDirectory = async () => {
     border: 1px solid var(--border);
     border-radius: 6px;
     margin-bottom: 8px;
-}
-
-.dev-toggle-item:hover {
-    background: rgba(255, 255, 255, 0.05);
 }
 
 .ext-install-toolbar {

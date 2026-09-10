@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, screen, shell, Tray, Menu, nativeImage, powerMonitor } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, shell, Tray, Menu, nativeImage, powerMonitor, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs-extra');
 const { spawn, exec, execSync } = require('child_process');
@@ -18,6 +18,7 @@ const { fetchLatestGitHubReleaseInfo } = require('./release-check');
 const xrayRelease = require('./xray-assets');
 const { supportsNativeGlass, getMainWindowMaterialOptions } = require('./native-glass');
 const { allocateLocalProxyPort, isXrayLocalBindFailure } = require('./local-proxy-port');
+const { createProfileSync } = require('./profile-sync');
 const gzip = promisify(zlib.gzip);
 const gunzip = promisify(zlib.gunzip);
 const initSqlJs = require('sql.js');
@@ -170,6 +171,7 @@ let activeProcesses = {};
 let launchingProfiles = new Set();
 const profileResourceWrites = new Set();
 let profileApiQueue = Promise.resolve();
+let configSync = null;
 
 function runProfileApiTask(task) {
     const result = profileApiQueue.then(task);
@@ -547,9 +549,15 @@ function createInternalApiServer() {
                         data.apiRevisions?.[entry.id] !== entry.apiUpdate.revision)) {
                         throw Object.assign(new Error('API 账号更新尚未导入，请关闭并重新启动环境'), { statusCode: 409 });
                     }
+                    const syncStateFile = path.join(DATA_PATH, data.profileId, 'passwords-sync-state.json');
+                    const syncState = fs.existsSync(syncStateFile) ? await fs.readJson(syncStateFile) : null;
+                    if (syncState?.revision && data.snapshotRevision !== syncState.revision) {
+                        throw Object.assign(new Error('同步密码库尚未导入，请关闭并重新启动环境'), { statusCode: 409 });
+                    }
                     await fs.ensureDir(path.dirname(pwFile));
                     await writeEncryptedPasswords(pwFile, data.passwords, data.profileId);
                 });
+                configSync?.schedule();
                 res.writeHead(200); res.end(JSON.stringify({ success: true, count: data.passwords.length }));
             } catch (err) {
                 res.writeHead(err.statusCode || 500); res.end(JSON.stringify({ success: false, error: err.message }));
@@ -1311,6 +1319,13 @@ async function saveSettingsWithNormalizedExtensions(settings) {
     return nextSettings;
 }
 
+async function saveExtensionSettings(extensions) {
+    return runProfileApiTask(async () => {
+        const latest = await readSettingsForExtensionMutation();
+        return saveSettingsWithNormalizedExtensions({ ...latest, userExtensions: extensions });
+    });
+}
+
 function normalizeSettingsSnapshot(settings) {
     const nextSettings = settings || {};
     if (!Array.isArray(nextSettings.preProxies)) nextSettings.preProxies = [];
@@ -1430,7 +1445,7 @@ function normalizePresetTotpSecret(value) {
     return normalizeTotpSecret(secret);
 }
 
-async function readDefaultPasswordSettings() {
+async function readDefaultPasswordSettings({ strict = false } = {}) {
     if (!fs.existsSync(DEFAULT_PASSWORDS_FILE)) return { passwords: [], scope: normalizeTagScope() };
     try {
         const data = await fs.readFile(DEFAULT_PASSWORDS_FILE);
@@ -1440,6 +1455,7 @@ async function readDefaultPasswordSettings() {
             scope: normalizeTagScope(stored?.scope)
         };
     } catch (error) {
+        if (strict) throw error;
         console.warn('[Password Manager] Failed to read built-in accounts:', error.message);
         return { passwords: [], scope: normalizeTagScope() };
     }
@@ -2623,6 +2639,9 @@ async function saveApiProfile(body, idOrName = null) {
 
 async function handleApiRequest(method, pathname, body, params, context = {}) {
     const profileMatch = pathname.match(/^\/api\/profiles\/([^\/]+)$/);
+    if (((method === 'DELETE' && profileMatch) || (method === 'POST' && pathname === '/api/import')) && !context.serialized) {
+        return runProfileApiTask(() => handleApiRequest(method, pathname, body, params, { ...context, serialized: true }));
+    }
     if (method === 'POST' && pathname === '/api/profiles') {
         return runProfileApiTask(() => saveApiProfile(body));
     }
@@ -3107,11 +3126,53 @@ async function focusRunningProfileWindow(profileId) {
         }) || pages[0];
 
         if (!preferred) return false;
+        await ensureBrowserWindowVisible(preferred, { nudge: process.platform === 'win32' });
         await preferred.bringToFront();
         try { app.focus({ steal: true }); } catch (e) { }
         return true;
     } catch (e) {
         return false;
+    }
+}
+
+async function ensureBrowserWindowVisible(page, { nudge = false } = {}) {
+    if (!page || typeof page.createCDPSession !== 'function') return;
+    let session = null;
+    try {
+        session = await page.createCDPSession();
+        const { windowId } = await session.send('Browser.getWindowForTarget');
+        let bounds = {};
+        try { bounds = await session.send('Browser.getWindowBounds', { windowId }); } catch (e) { }
+        const display = screen.getDisplayNearestPoint({
+            x: Number.isFinite(bounds.left) ? bounds.left : 0,
+            y: Number.isFinite(bounds.top) ? bounds.top : 0
+        });
+        const workArea = display?.workArea || screen.getPrimaryDisplay().workArea;
+        const currentWidth = Number(bounds.width) || 1280;
+        const currentHeight = Number(bounds.height) || 800;
+        const width = Math.max(480, Math.min(currentWidth, workArea.width));
+        const height = Math.max(360, Math.min(currentHeight, workArea.height));
+        const currentLeft = Number.isFinite(bounds.left) ? bounds.left : workArea.x;
+        const currentTop = Number.isFinite(bounds.top) ? bounds.top : workArea.y;
+        const left = Math.max(workArea.x, Math.min(currentLeft, workArea.x + workArea.width - width));
+        const top = Math.max(workArea.y, Math.min(currentTop, workArea.y + workArea.height - height));
+        // Chromium can finish launching with a valid page but a hidden window
+        // on Windows. A short minimize/restore transition reliably activates
+        // the native window once its handle has been created.
+        if (nudge) {
+            await session.send('Browser.setWindowBounds', {
+                windowId,
+                bounds: { windowState: 'minimized' }
+            });
+            await sleep(80);
+        }
+        await session.send('Browser.setWindowBounds', {
+            windowId,
+            bounds: { left, top, width, height, windowState: 'normal' }
+        });
+    } catch (e) { }
+    finally {
+        try { await session?.detach(); } catch (e) { }
     }
 }
 
@@ -3131,6 +3192,7 @@ function quitApplication() {
 }
 
 function broadcastProfileStopped(profileId) {
+    configSync?.schedule();
     const windows = BrowserWindow.getAllWindows();
     for (const win of windows) {
         try {
@@ -3531,6 +3593,7 @@ function createWindow() {
 
 // Helper to notify UI to refresh profiles
 function notifyUIRefresh() {
+    configSync?.schedule();
     const windows = BrowserWindow.getAllWindows();
     windows.forEach((win) => {
         try {
@@ -3548,11 +3611,14 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
     // 读取已保存的密码 (解密)
     const pwFile = path.join(DATA_PATH, profileId, 'passwords.json');
     const passwords = await readEncryptedPasswords(pwFile, profileId);
+    const syncStateFile = path.join(DATA_PATH, profileId, 'passwords-sync-state.json');
+    const syncState = fs.existsSync(syncStateFile) ? await fs.readJson(syncStateFile) : null;
 
     // 内部扩展固定使用独立端口 12139
     const apiPort = INTERNAL_API_PORT;
     const backgroundConfig = `const PROFILE_ID = ${JSON.stringify(profileId || '')};\n` +
-        `const API_PORT = ${apiPort};\nconst INIT_PASSWORDS = ${JSON.stringify(passwords)};\n`;
+        `const API_PORT = ${apiPort};\nconst INIT_PASSWORDS = ${JSON.stringify(passwords)};\n` +
+        `const INIT_PASSWORDS_REVISION = ${JSON.stringify(syncState?.revision || '')};\n`;
     const backgroundScript = backgroundConfig + guardBackground;
     const backgroundHash = crypto.createHash('sha256').update(backgroundScript).digest('hex').slice(0, 16);
     const backgroundFile = `background-${backgroundHash}.js`;
@@ -3560,7 +3626,7 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
     const manifest = {
         manifest_version: 3,
         name: "GeekEZ Guard",
-        version: "1.2.2",
+        version: "1.2.3",
         description: "Privacy & Password Protection",
         permissions: ["storage", "activeTab"],
         host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
@@ -3606,6 +3672,25 @@ async function generateExtension(profilePath, fingerprint, profileName, watermar
 }
 
 app.whenReady().then(async () => {
+    configSync = createProfileSync({
+        app, safeStorage, ipcMain, dialog,
+        paths: { DATA_PATH, PROFILES_FILE, SETTINGS_FILE, DEFAULT_PASSWORDS_FILE },
+        helpers: {
+            runProfileApiTask, readEncryptedPasswords, readDefaultPasswordSettings, normalizeDefaultPasswords,
+            normalizeSettingsSnapshot, normalizeBookmarksDocument, buildProfileFromInput, encryptData,
+            commitProfileFiles, profileResourceWrites, notifyUIRefresh,
+            onSettingsApplied: settings => { cachedCloseBehavior = normalizeCloseBehavior(settings.closeBehavior); },
+            busyProfileIds: () => [...new Set([...Object.keys(activeProcesses), ...launchingProfiles])]
+        },
+        broadcast: (channel, payload) => BrowserWindow.getAllWindows().forEach(win => {
+            if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(channel, payload);
+        })
+    });
+    await configSync.init().then(() => configSync.schedule()).catch(error => {
+        configSync.credentials = null;
+        configSync.setStatus({ phase: 'error', error: 'syncLocalError' });
+        console.error('[Config Sync] Initialization failed:', error.message);
+    });
     cachedCloseBehavior = normalizeCloseBehavior(readSettingsSync().closeBehavior);
     initializeProxyRecoveryMonitor();
     createWindow();
@@ -3768,6 +3853,20 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Puppeteer 25 exposes browser connectivity as a property. Older releases used
+// isConnected(), so keep this check compatible with both versions and with the
+// Windows packaged runtime.
+function isBrowserConnected(browser) {
+    if (!browser) return false;
+    try {
+        if (typeof browser.isConnected === 'function') return browser.isConnected();
+        if (typeof browser.connected === 'boolean') return browser.connected;
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function attachXrayExitRecovery(profileId, child) {
     if (!child) return;
     const scheduleRecovery = (code, signal) => {
@@ -3797,7 +3896,7 @@ async function restartProfileXray(profileId, proc, reason) {
     await sleep(150);
 
     for (let attempt = 1; attempt <= 3; attempt++) {
-        if (activeProcesses[profileId] !== proc || proc.stopping || !proc.browser?.isConnected()) {
+        if (activeProcesses[profileId] !== proc || proc.stopping || !isBrowserConnected(proc.browser)) {
             return false;
         }
 
@@ -3836,7 +3935,7 @@ async function recoverProfileProxy(profileId, reason = 'runtime-health-check') {
     try {
         const health = await waitForSocksProxyUsable(proc.localPort, 4500, 1200, proc.xrayProcess);
         if (health.success) return true;
-        if (activeProcesses[profileId] !== proc || proc.stopping || !proc.browser?.isConnected()) {
+        if (activeProcesses[profileId] !== proc || proc.stopping || !isBrowserConnected(proc.browser)) {
             return false;
         }
 
@@ -4372,7 +4471,7 @@ ipcMain.handle('get-profile-runtime-state', () => ({
     launchingIds: Array.from(launchingProfiles)
 }));
 ipcMain.handle('get-profiles', async () => { if (!fs.existsSync(PROFILES_FILE)) return []; return fs.readJson(PROFILES_FILE); });
-ipcMain.handle('update-profile', async (event, updatedProfile) => {
+ipcMain.handle('update-profile', (event, updatedProfile) => runProfileApiTask(async () => {
     const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
     const index = profiles.findIndex(p => p.id === updatedProfile.id);
     if (index === -1) return false;
@@ -4384,8 +4483,8 @@ ipcMain.handle('update-profile', async (event, updatedProfile) => {
     await fs.writeJson(PROFILES_FILE, profiles);
     notifyUIRefresh();
     return true;
-});
-ipcMain.handle('save-profile', async (event, data) => {
+}));
+ipcMain.handle('save-profile', (event, data) => runProfileApiTask(async () => {
     const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
     const settings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
     let newProfile = await applyDefaultBookmarksToProfile(
@@ -4397,8 +4496,8 @@ ipcMain.handle('save-profile', async (event, data) => {
     await fs.writeJson(PROFILES_FILE, profiles);
     notifyUIRefresh();
     return newProfile;
-});
-ipcMain.handle('reorder-profiles', async (event, orderedIds) => {
+}));
+ipcMain.handle('reorder-profiles', (event, orderedIds) => runProfileApiTask(async () => {
     if (!Array.isArray(orderedIds)) return false;
     const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
     const currentIds = profiles.map(profile => profile.id);
@@ -4411,8 +4510,8 @@ ipcMain.handle('reorder-profiles', async (event, orderedIds) => {
     await fs.writeJson(PROFILES_FILE, nextIds.map(id => byId.get(id)));
     notifyUIRefresh();
     return true;
-});
-ipcMain.handle('delete-profile', async (event, id) => {
+}));
+ipcMain.handle('delete-profile', (event, id) => runProfileApiTask(async () => {
     // 关闭正在运行的进程
     if (activeProcesses[id]) {
         await stopRunningProfile(id, { refreshMenu: false });
@@ -4465,7 +4564,7 @@ ipcMain.handle('delete-profile', async (event, id) => {
     }
 
     return true;
-});
+}));
 ipcMain.handle('get-settings', async () => {
     const storedSettings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : {};
     const hasStoredPasswordScope = Object.prototype.hasOwnProperty.call(storedSettings, 'defaultPasswordScope');
@@ -4491,7 +4590,7 @@ ipcMain.handle('get-settings', async () => {
             })
     };
 });
-ipcMain.handle('save-settings', async (e, settings) => {
+ipcMain.handle('save-settings', (e, settings) => runProfileApiTask(async () => {
     const incoming = (settings && typeof settings === 'object')
         ? JSON.parse(JSON.stringify(settings))
         : {};
@@ -4509,9 +4608,10 @@ ipcMain.handle('save-settings', async (e, settings) => {
     const merged = { ...(existing || {}), ...(incoming || {}) };
     delete merged.defaultPasswords;
     await saveSettingsWithNormalizedExtensions(merged);
+    configSync?.schedule();
     refreshTrayMenu().catch(() => { });
     return true;
-});
+}));
 ipcMain.handle('select-extension-folder', async () => {
     const { filePaths } = await dialog.showOpenDialog({
         properties: ['openDirectory'],
@@ -4652,7 +4752,7 @@ ipcMain.handle('add-user-extension', async (e, payload) => {
         }
 
         settings.userExtensions = normalizeUserExtensions(extensions);
-        await saveSettingsWithNormalizedExtensions(settings);
+        await saveExtensionSettings(settings.userExtensions);
         sendProgress(100, '扩展安装完成', true);
         return installed;
     } catch (err) {
@@ -4676,7 +4776,7 @@ ipcMain.handle('update-user-extension-scope', async (e, payload) => {
         applyMode,
         profileIds
     };
-    await saveSettingsWithNormalizedExtensions(settings);
+    await saveExtensionSettings(settings.userExtensions);
     return settings.userExtensions[idx];
 });
 ipcMain.handle('remove-user-extension', async (e, payload) => {
@@ -4694,7 +4794,7 @@ ipcMain.handle('remove-user-extension', async (e, payload) => {
     if (!matched) return true;
 
     settings.userExtensions = settings.userExtensions.filter(ext => ext.id !== matched.id);
-    await saveSettingsWithNormalizedExtensions(settings);
+    await saveExtensionSettings(settings.userExtensions);
 
     if ((matched.source === 'crx' || matched.source === 'store') && matched.path.startsWith(USER_EXTENSIONS_DIR)) {
         await fs.remove(matched.path).catch(() => { });
@@ -5103,7 +5203,7 @@ ipcMain.handle('select-backup-file', async () => {
 });
 
 // 导入完整备份 (支持 v1 旧格式 + v2 跨平台格式)
-ipcMain.handle('import-full-backup', async (e, { filePath, password }) => {
+ipcMain.handle('import-full-backup', (e, { filePath, password }) => runProfileApiTask(async () => {
     currentImportProgress = { percent: 0, message: 'Reading File...', processing: true };
     try {
         if (!filePath) {
@@ -5236,6 +5336,7 @@ ipcMain.handle('import-full-backup', async (e, { filePath, password }) => {
             }
         }
 
+        notifyUIRefresh();
         return { success: true, count: importedCount };
     } catch (err) {
         console.error('Import full backup failed:', err);
@@ -5244,7 +5345,7 @@ ipcMain.handle('import-full-backup', async (e, { filePath, password }) => {
         }
         return { success: false, error: err.message };
     }
-});
+}));
 
 // 导入普通备份 (YAML)
 ipcMain.handle('import-data', async () => {
@@ -5254,55 +5355,58 @@ ipcMain.handle('import-data', async () => {
     });
 
     if (filePaths && filePaths.length > 0) {
-        try {
-            const content = await fs.readFile(filePaths[0], 'utf8');
-            const data = yaml.load(content);
-            let updated = false;
+        return runProfileApiTask(async () => {
+            try {
+                const content = await fs.readFile(filePaths[0], 'utf8');
+                const data = yaml.load(content);
+                let updated = false;
 
-            if (data.profiles || data.preProxies || data.subscriptions) {
-                if (Array.isArray(data.profiles)) {
-                    const currentProfiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
-                    data.profiles.forEach(p => {
-                        const idx = currentProfiles.findIndex(cp => cp.id === p.id);
-                        if (idx > -1) currentProfiles[idx] = p;
-                        else {
-                            if (!p.id) p.id = uuidv4();
-                            currentProfiles.push(p);
+                if (data.profiles || data.preProxies || data.subscriptions) {
+                    if (Array.isArray(data.profiles)) {
+                        const currentProfiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
+                        data.profiles.forEach(p => {
+                            const idx = currentProfiles.findIndex(cp => cp.id === p.id);
+                            if (idx > -1) currentProfiles[idx] = p;
+                            else {
+                                if (!p.id) p.id = uuidv4();
+                                currentProfiles.push(p);
+                            }
+                        });
+                        await fs.writeJson(PROFILES_FILE, currentProfiles);
+                        updated = true;
+                    }
+                    if (Array.isArray(data.preProxies) || Array.isArray(data.subscriptions)) {
+                        const currentSettings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : { preProxies: [], subscriptions: [] };
+                        if (data.preProxies) {
+                            if (!currentSettings.preProxies) currentSettings.preProxies = [];
+                            data.preProxies.forEach(p => {
+                                if (!currentSettings.preProxies.find(cp => cp.id === p.id)) currentSettings.preProxies.push(p);
+                            });
                         }
-                    });
-                    await fs.writeJson(PROFILES_FILE, currentProfiles);
+                        if (data.subscriptions) {
+                            if (!currentSettings.subscriptions) currentSettings.subscriptions = [];
+                            data.subscriptions.forEach(s => {
+                                if (!currentSettings.subscriptions.find(cs => cs.id === s.id)) currentSettings.subscriptions.push(s);
+                            });
+                        }
+                        await fs.writeJson(SETTINGS_FILE, currentSettings);
+                        updated = true;
+                    }
+                } else if (data.name && data.proxyStr && data.fingerprint) {
+                    // 单个环境导入
+                    const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
+                    const newProfile = { ...data, id: uuidv4(), isSetup: false, createdAt: Date.now() };
+                    profiles.push(newProfile);
+                    await fs.writeJson(PROFILES_FILE, profiles);
                     updated = true;
                 }
-                if (Array.isArray(data.preProxies) || Array.isArray(data.subscriptions)) {
-                    const currentSettings = fs.existsSync(SETTINGS_FILE) ? await fs.readJson(SETTINGS_FILE) : { preProxies: [], subscriptions: [] };
-                    if (data.preProxies) {
-                        if (!currentSettings.preProxies) currentSettings.preProxies = [];
-                        data.preProxies.forEach(p => {
-                            if (!currentSettings.preProxies.find(cp => cp.id === p.id)) currentSettings.preProxies.push(p);
-                        });
-                    }
-                    if (data.subscriptions) {
-                        if (!currentSettings.subscriptions) currentSettings.subscriptions = [];
-                        data.subscriptions.forEach(s => {
-                            if (!currentSettings.subscriptions.find(cs => cs.id === s.id)) currentSettings.subscriptions.push(s);
-                        });
-                    }
-                    await fs.writeJson(SETTINGS_FILE, currentSettings);
-                    updated = true;
-                }
-            } else if (data.name && data.proxyStr && data.fingerprint) {
-                // 单个环境导入
-                const profiles = fs.existsSync(PROFILES_FILE) ? await fs.readJson(PROFILES_FILE) : [];
-                const newProfile = { ...data, id: uuidv4(), isSetup: false, createdAt: Date.now() };
-                profiles.push(newProfile);
-                await fs.writeJson(PROFILES_FILE, profiles);
-                updated = true;
+                if (updated) notifyUIRefresh();
+                return updated;
+            } catch (e) {
+                console.error(e);
+                throw e;
             }
-            return updated;
-        } catch (e) {
-            console.error(e);
-            throw e;
-        }
+        });
     }
     return false;
 });
@@ -5377,7 +5481,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
 
     if (activeProcesses[profileId]) {
         const proc = activeProcesses[profileId];
-        if (proc.browser && proc.browser.isConnected()) {
+        if (isBrowserConnected(proc.browser)) {
             try {
                 const targets = await proc.browser.targets();
                 const pageTarget = targets.find(t => t.type() === 'page');
@@ -5411,6 +5515,9 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
         return preferredLang === 'en' ? 'Profile is starting' : '环境启动中';
     }
 
+    if (profileResourceWrites.has(profileId)) {
+        throw profileResourceError('Profile data is being updated; retry launching shortly', 409);
+    }
     await markLaunching(true);
     updateLaunchProgress(
         5,
@@ -5448,9 +5555,14 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
 
     // Auto-assign a stable remote debugging port when feature is enabled and no explicit port exists.
     if (settings.enableRemoteDebugging && !normalizeDebugPort(profile.debugPort)) {
-        profile.debugPort = await allocateDebugPortIfNeeded(settings, profiles, null);
-        profiles[profileIndex] = profile;
-        await fs.writeJson(PROFILES_FILE, profiles);
+        await runProfileApiTask(async () => {
+            const latest = await fs.readJson(PROFILES_FILE);
+            const entry = latest.find(item => item.id === profileId);
+            if (!entry) throw new Error('Profile not found');
+            profile.debugPort = await allocateDebugPortIfNeeded(settings, latest, entry.debugPort);
+            entry.debugPort = profile.debugPort;
+            await fs.writeJson(PROFILES_FILE, latest);
+        });
     }
 
     const useDirectNetwork = isDirectProxy(profile.proxyStr);
@@ -5507,6 +5619,11 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
             if (preferences.protection) delete preferences.protection;
             if (!preferences.profile) preferences.profile = {};
             preferences.profile.name = profile.name;
+            // Chromium on Windows otherwise opens only its crash-recovery
+            // prompt after an interrupted launch. Mark the previous session
+            // clean before requesting last-session restoration.
+            preferences.profile.exit_type = 'Normal';
+            preferences.profile.exited_cleanly = true;
             if (!preferences.webrtc) preferences.webrtc = {};
             preferences.webrtc.ip_handling_policy = 'disable_non_proxied_udp';
             await fs.writeJson(preferencesPath, preferences);
@@ -6103,6 +6220,11 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
             }, 500);
 
             await ensureAtLeastOnePage();
+            const firstPage = (await browser.pages())[0];
+            if (firstPage) {
+                await ensureBrowserWindowVisible(firstPage, { nudge: process.platform === 'win32' });
+                await firstPage.bringToFront().catch(() => { });
+            }
         } catch (e) {
             console.error('Failed to process startup pages:', e);
         }

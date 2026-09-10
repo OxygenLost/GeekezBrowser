@@ -23,6 +23,7 @@ const uiStore = useUIStore();
 <style scoped>
 .confirm-modal-content {
     width: min(88vw, 560px);
+    max-width: calc(100vw - 32px);
     min-width: min(320px, 88vw);
     padding: clamp(18px, 2.2vw, 28px);
 }
