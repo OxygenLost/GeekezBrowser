@@ -14,6 +14,16 @@
 
 </div>
 
+## ❤️ 赞助商
+
+<table>
+<tr>
+<td width="180"><a href="https://www.swiftproxy.net/?code=XJXTWR010"><img src="https://browser.geekez.net/assets/swiftproxy-sponsor.png" alt="Swiftproxy" width="150"></a></td>
+<td>感谢 <a href="https://www.swiftproxy.net/?code=XJXTWR010">Swiftproxy</a> 对本项目的赞助！Swiftproxy 拥有覆盖全球 220+ 个地区的 9000 万+ 优质纯净住宅 IP，支持 HTTP(S)/SOCKS5 协议、IP 轮换、粘性会话与高精度地理定位，是浏览器自动化与跨境多账号防关联运营的理想选择。支持免费测试，通过 <a href="https://www.swiftproxy.net/?code=XJXTWR010">专属链接</a> 注册并输入优惠码 <b>PROXY90</b> 即可尊享 9 折专属优惠！</td>
+</tr>
+</table>
+
+
 ---
 
 ## 📖 简介

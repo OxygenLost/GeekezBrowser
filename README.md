@@ -14,6 +14,16 @@
 
 </div>
 
+## ❤️ Sponsor
+
+<table>
+<tr>
+<td width="180"><a href="https://www.swiftproxy.net/?code=XJXTWR010"><img src="https://browser.geekez.net/assets/swiftproxy-sponsor.png" alt="Swiftproxy" width="150"></a></td>
+<td>Thanks to <a href="https://www.swiftproxy.net/?code=XJXTWR010">Swiftproxy</a> for sponsoring this project! Swiftproxy provides 90M+ clean residential IPs across 220+ locations, supporting HTTP(S)/SOCKS5, IP rotation, Sticky Sessions, and precise geo-targeting for browser automation and multi-account management. Free testing is available. Register via <a href="https://www.swiftproxy.net/?code=XJXTWR010">this link</a> and use promo code <b>PROXY90</b> for an exclusive 10% discount!</td>
+</tr>
+</table>
+
+
 ---
 
 ## 📖 Introduction
