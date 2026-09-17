@@ -81,6 +81,7 @@ import guardBackground from './guard/background.js?raw';
 import guardPasswordContent from './guard/content-passwords.js?raw';
 import guardPopupHtml from './guard/popup.html?raw';
 import guardPopupScript from './guard/popup.js?raw';
+import { prepareMacProfileChromium, removeMacProfileApp } from './macos-profile-app';
 
 const isDev = !app.isPackaged;
 const RESOURCES_BIN = isDev ? path.join(app.getAppPath(), 'resources', 'bin') : path.join(process.resourcesPath, 'bin');
@@ -117,10 +118,12 @@ const PROFILES_FILE = path.join(DATA_PATH, 'profiles.json');
 const SETTINGS_FILE = path.join(DATA_PATH, 'settings.json');
 const DEFAULT_PASSWORDS_FILE = path.join(DATA_PATH, 'default-passwords.json');
 const USER_EXTENSIONS_DIR = path.join(DATA_PATH, '_extensions');
+const MAC_PROFILE_APPS_DIR = path.join(app.getPath('userData'), 'ProfileApps');
 
 fs.ensureDirSync(DATA_PATH);
 fs.ensureDirSync(TRASH_PATH);
 fs.ensureDirSync(USER_EXTENSIONS_DIR);
+if (process.platform === 'darwin') fs.ensureDirSync(MAC_PROFILE_APPS_DIR);
 
 const EXTENSION_STORE_CATALOG = [
     {
@@ -4563,6 +4566,14 @@ ipcMain.handle('delete-profile', (event, id) => runProfileApiTask(async () => {
         }
     }
 
+    if (process.platform === 'darwin') {
+        try {
+            await removeMacProfileApp({ profileId: id, rootDir: MAC_PROFILE_APPS_DIR });
+        } catch (err) {
+            console.warn(`Failed to remove macOS Dock app for profile ${id}:`, err.message);
+        }
+    }
+
     return true;
 }));
 ipcMain.handle('get-settings', async () => {
@@ -5963,12 +5974,33 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
             { step: 8, profileName: progressProfileName }
         );
         // 5. 启动浏览器
-        const chromePath = getChromiumPath();
-        if (!chromePath) {
+        const sourceChromePath = getChromiumPath();
+        if (!sourceChromePath) {
             if (xrayProcess && xrayProcess.pid) {
                 await forceKill(xrayProcess.pid);
             }
             throw new Error("Chrome binary not found.");
+        }
+
+        let chromePath = sourceChromePath;
+        if (process.platform === 'darwin') {
+            try {
+                const preparedProfileApp = await prepareMacProfileChromium({
+                    sourceExecutable: sourceChromePath,
+                    profileId,
+                    profileName: profile.name,
+                    rootDir: MAC_PROFILE_APPS_DIR
+                });
+                chromePath = preparedProfileApp.executablePath;
+                console.log(
+                    `[macOS Dock] ${profile.name || profileId}: ${preparedProfileApp.bundleId} -> ${preparedProfileApp.appPath}`
+                );
+            } catch (dockAppError) {
+                console.warn(
+                    `[macOS Dock] Failed to prepare stable app identity for ${profile.name || profileId}; using bundled Chromium:`,
+                    dockAppError?.message || dockAppError
+                );
+            }
         }
 
         // GeekEZ Guard owns credential capture and autofill. Disable only the
