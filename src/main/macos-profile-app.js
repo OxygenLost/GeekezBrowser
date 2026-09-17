@@ -6,7 +6,9 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = '.geekez-profile-app.json';
-const MANIFEST_VERSION = 1;
+const MANIFEST_VERSION = 2;
+const PROFILE_LAUNCHER_NAME = 'GeekEZ Profile Launcher';
+const PROFILE_ID_RESOURCE = 'geekez-profile-id';
 
 function stableProfileKey(profileId) {
     return crypto
@@ -44,6 +46,24 @@ async function setPlistString(plistPath, key, value) {
         '-string', String(value),
         plistPath
     ]);
+}
+
+async function installProfileLauncher(appPath, profileId) {
+    const launcherPath = path.join(appPath, 'Contents', 'MacOS', PROFILE_LAUNCHER_NAME);
+    const resourceDir = path.join(appPath, 'Contents', 'Resources');
+    const profileIdPath = path.join(resourceDir, PROFILE_ID_RESOURCE);
+    const launcherScript = `#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PROFILE_ID=$(cat "$SCRIPT_DIR/../Resources/${PROFILE_ID_RESOURCE}")
+exec /usr/bin/open -n -b com.geekez.browser --args "--geekez-profile=$PROFILE_ID"
+`;
+
+    await fs.ensureDir(resourceDir);
+    await fs.writeFile(profileIdPath, String(profileId), 'utf8');
+    await fs.writeFile(launcherPath, launcherScript, { mode: 0o755 });
+    await fs.chmod(launcherPath, 0o755);
+    await setPlistString(path.join(appPath, 'Contents', 'Info.plist'), 'CFBundleExecutable', PROFILE_LAUNCHER_NAME);
 }
 
 async function sourceFingerprint(sourceExecutable, sourceAppPath) {
@@ -140,19 +160,34 @@ async function prepareMacProfileChromium(options = {}) {
     const appFileName = existingAppFileName || `${displayName}.app`;
     const appPath = path.join(profileRoot, appFileName);
     const executablePath = path.join(appPath, 'Contents', 'MacOS', sourceExecutableName);
+    const launcherPath = path.join(appPath, 'Contents', 'MacOS', PROFILE_LAUNCHER_NAME);
+    const profileIdPath = path.join(appPath, 'Contents', 'Resources', PROFILE_ID_RESOURCE);
     const fingerprint = await sourceFingerprint(sourceExecutable, sourceAppPath);
 
-    const canReuse = Boolean(
+    const sourceMatches = Boolean(
         manifest &&
-        manifest.version === MANIFEST_VERSION &&
         manifest.sourceFingerprint === fingerprint &&
         manifest.bundleId === bundleId &&
         await fs.pathExists(executablePath)
     );
+    const canReuse = Boolean(
+        sourceMatches &&
+        manifest.version === MANIFEST_VERSION &&
+        await fs.pathExists(launcherPath) &&
+        await fs.pathExists(profileIdPath)
+    );
 
-    if (!canReuse) {
+    if (!sourceMatches) {
         await cloneAppBundle(sourceAppPath, appPath);
         await updateProfileIdentity(appPath, bundleId, displayName);
+        await installProfileLauncher(appPath, profileId);
+    } else if (!canReuse) {
+        // Upgrade an already pinned v1 profile app in place. Replacing the
+        // bundle while Chromium is running can disrupt helper/resource loads,
+        // while updating the launcher metadata is safe and preserves the
+        // exact path referenced by the Dock item.
+        await updateProfileIdentity(appPath, bundleId, displayName);
+        await installProfileLauncher(appPath, profileId);
     } else if (manifest.displayName !== displayName) {
         // Keep the .app path stable for an already pinned Dock item, while still
         // updating the visible application metadata after a profile rename.
@@ -183,6 +218,7 @@ async function removeMacProfileApp(options = {}) {
 
 export {
     findAppBundle,
+    installProfileLauncher,
     prepareMacProfileChromium,
     profileBundleId,
     removeMacProfileApp,

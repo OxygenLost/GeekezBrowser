@@ -34,6 +34,30 @@ process.stderr?.on?.('error', handleProcessStreamError);
 
 const uuidv4 = () => crypto.randomUUID();
 
+const PROFILE_SHORTCUT_ARG_PREFIX = '--geekez-profile=';
+const initialProfileShortcutId = getProfileShortcutId(process.argv);
+const pendingProfileShortcutIds = new Set();
+let profileShortcutReady = false;
+let profileShortcutFlushRunning = false;
+let suppressProfileShortcutActivate = Boolean(initialProfileShortcutId);
+
+function getProfileShortcutId(argv = []) {
+    if (!Array.isArray(argv)) return '';
+    const arg = argv.find((value) => typeof value === 'string' && value.startsWith(PROFILE_SHORTCUT_ARG_PREFIX));
+    return arg ? arg.slice(PROFILE_SHORTCUT_ARG_PREFIX.length).trim() : '';
+}
+
+function queueProfileShortcutLaunch(profileId) {
+    const normalized = String(profileId || '').trim();
+    if (!normalized) return;
+    pendingProfileShortcutIds.add(normalized);
+    if (profileShortcutReady) {
+        setImmediate(() => flushProfileShortcutLaunches().catch((error) => {
+            console.error('[Profile Shortcut] Failed to flush launch queue:', error);
+        }));
+    }
+}
+
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
     app.quit();
@@ -3179,7 +3203,12 @@ async function ensureBrowserWindowVisible(page, { nudge = false } = {}) {
     }
 }
 
-app.on('second-instance', () => {
+app.on('second-instance', (event, commandLine) => {
+    const profileId = getProfileShortcutId(commandLine);
+    if (profileId) {
+        queueProfileShortcutLaunch(profileId);
+        return;
+    }
     showMainWindow();
 });
 
@@ -3537,12 +3566,14 @@ async function createTray() {
     return appTray;
 }
 
-function createWindow() {
+function createWindow(options = {}) {
+    const { show = true } = options;
     const { width, height } = screen.getPrimaryDisplay().workAreaSize;
     const systemVersion = typeof app.getSystemVersion === 'function' ? app.getSystemVersion() : '';
     const materialOptions = getMainWindowMaterialOptions(process.platform, systemVersion);
     const win = new BrowserWindow({
         width: Math.round(width * 0.5), height: Math.round(height * 0.601), minWidth: 900, minHeight: 600,
+        show,
         title: "GeekEZ Browser",
         icon: resolveWindowIconPath(),
         ...(process.platform !== 'darwin'
@@ -3696,7 +3727,11 @@ app.whenReady().then(async () => {
     });
     cachedCloseBehavior = normalizeCloseBehavior(readSettingsSync().closeBehavior);
     initializeProxyRecoveryMonitor();
-    createWindow();
+    createWindow({ show: !initialProfileShortcutId });
+    if (initialProfileShortcutId && process.platform === 'darwin' && app.dock && typeof app.dock.hide === 'function') {
+        const hideRet = app.dock.hide();
+        if (hideRet && typeof hideRet.catch === 'function') hideRet.catch(() => { });
+    }
     await createTray().catch((err) => {
         console.error('Failed to initialize tray:', err);
     });
@@ -3734,10 +3769,16 @@ app.whenReady().then(async () => {
         console.error('Failed to auto-start Public API server:', e);
     }
 
+    profileShortcutReady = true;
+    if (initialProfileShortcutId) pendingProfileShortcutIds.add(initialProfileShortcutId);
+    await flushProfileShortcutLaunches();
+    suppressProfileShortcutActivate = false;
+
     setTimeout(() => { fs.emptyDir(TRASH_PATH).catch(() => { }); }, 10000);
 });
 
 app.on('activate', () => {
+    if (suppressProfileShortcutActivate) return;
     showMainWindow();
 });
 
@@ -6371,6 +6412,54 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
     }
 };
 ipcMain.handle('launch-profile', launchProfileHandler);
+
+async function launchProfileFromShortcut(profileId) {
+    const profiles = await readAllProfilesSafe();
+    const profile = profiles.find((item) => item.id === profileId);
+    if (!profile) {
+        console.warn(`[Profile Shortcut] Profile not found: ${profileId}`);
+        showMainWindow();
+        return;
+    }
+
+    const settings = readSettingsSync();
+    const preferredLang = settings.lang === 'en' ? 'en' : 'cn';
+    const watermarkStyle = settings.watermarkStyle === 'banner' || settings.watermarkStyle === 'off'
+        ? settings.watermarkStyle
+        : 'enhanced';
+
+    console.log(`[Profile Shortcut] Launching ${profile.name || profileId} (${profileId})`);
+    await launchProfileHandler(
+        getProfileLaunchEventSender(),
+        profileId,
+        watermarkStyle,
+        preferredLang
+    );
+}
+
+async function flushProfileShortcutLaunches() {
+    if (!profileShortcutReady || profileShortcutFlushRunning) return;
+    profileShortcutFlushRunning = true;
+    try {
+        while (pendingProfileShortcutIds.size > 0) {
+            const [profileId] = pendingProfileShortcutIds;
+            pendingProfileShortcutIds.delete(profileId);
+            try {
+                await launchProfileFromShortcut(profileId);
+            } catch (error) {
+                console.error(`[Profile Shortcut] Failed to launch ${profileId}:`, error);
+                showMainWindow();
+            }
+        }
+    } finally {
+        profileShortcutFlushRunning = false;
+        if (profileShortcutReady && pendingProfileShortcutIds.size > 0) {
+            setImmediate(() => flushProfileShortcutLaunches().catch((error) => {
+                console.error('[Profile Shortcut] Failed to resume launch queue:', error);
+            }));
+        }
+    }
+}
 
 app.on('before-quit', () => {
     isAppQuitting = true;
