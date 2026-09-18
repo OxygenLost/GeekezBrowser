@@ -105,7 +105,12 @@ import guardBackground from './guard/background.js?raw';
 import guardPasswordContent from './guard/content-passwords.js?raw';
 import guardPopupHtml from './guard/popup.html?raw';
 import guardPopupScript from './guard/popup.js?raw';
-import { prepareMacProfileChromium, removeMacProfileApp } from './macos-profile-app';
+import {
+    prepareMacProfileChromium,
+    removeMacProfileApp,
+    restoreMacProfileLauncher,
+    restoreMacProfileLauncherSync
+} from './macos-profile-app';
 
 const isDev = !app.isPackaged;
 const RESOURCES_BIN = isDev ? path.join(app.getAppPath(), 'resources', 'bin') : path.join(process.resourcesPath, 'bin');
@@ -511,6 +516,26 @@ function createInternalApiServer() {
         if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
         const url = new URL(req.url, `http://localhost:${INTERNAL_API_PORT}`);
+
+        if (req.method === 'POST' && url.pathname === '/api/profile-shortcut') {
+            if (req.headers['x-geekez-profile-shortcut'] !== '1') {
+                res.writeHead(403);
+                return res.end(JSON.stringify({ success: false, error: 'Forbidden' }));
+            }
+            const profileId = String(url.searchParams.get('profileId') || '').trim();
+            if (!profileId || !/^[a-zA-Z0-9_-]+$/.test(profileId)) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ success: false, error: 'valid profileId required' }));
+            }
+            const profiles = await readAllProfilesSafe();
+            if (!profiles.some(profile => profile.id === profileId)) {
+                res.writeHead(404);
+                return res.end(JSON.stringify({ success: false, error: 'Profile not found' }));
+            }
+            queueProfileShortcutLaunch(profileId);
+            res.writeHead(202);
+            return res.end(JSON.stringify({ success: true, profileId }));
+        }
 
         if (req.method === 'GET' && url.pathname === '/api/runtime/language') {
             const profileId = String(url.searchParams.get('profileId') || '').trim();
@@ -3247,6 +3272,11 @@ async function stopRunningProfile(profileId, options = {}) {
     if (proc.logFd !== undefined) {
         try { fs.closeSync(proc.logFd); } catch (e) { }
     }
+    if (proc.macProfileApp) {
+        await restoreMacProfileLauncher(proc.macProfileApp).catch((error) => {
+            console.warn(`[macOS Dock] Failed to restore launcher for ${profileId}:`, error.message);
+        });
+    }
 
     delete activeProcesses[profileId];
     broadcastProfileStopped(profileId);
@@ -5646,6 +5676,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
     let xrayProcess = null;
     let logFd;
     let browser = null;
+    let macProfileApp = null;
     try {
         const profileDir = path.join(DATA_PATH, profileId);
         const userDataDir = path.join(profileDir, 'browser_data');
@@ -6032,6 +6063,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                     profileName: profile.name,
                     rootDir: MAC_PROFILE_APPS_DIR
                 });
+                macProfileApp = preparedProfileApp;
                 chromePath = preparedProfileApp.executablePath;
                 console.log(
                     `[macOS Dock] ${profile.name || profileId}: ${preparedProfileApp.bundleId} -> ${preparedProfileApp.appPath}`
@@ -6305,6 +6337,7 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
             xrayConfigPath,
             localPort,
             browser,
+            macProfileApp,
             logFd,
             recoveringProxy: false,
             stopping: false
@@ -6380,6 +6413,11 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
                 if (!sender.isDestroyed()) sender.send('profile-status', { id: profileId, status: 'stopped' });
                 refreshTrayMenu().catch(() => { });
             }
+            if (macProfileApp) {
+                await restoreMacProfileLauncher(macProfileApp).catch((error) => {
+                    console.warn(`[macOS Dock] Failed to restore launcher for ${profile.name || profileId}:`, error.message);
+                });
+            }
         });
 
         return switchMsg;
@@ -6401,6 +6439,11 @@ const launchProfileHandler = async (event, profileId, watermarkStyle, preferredL
         launchingProfiles.delete(profileId);
         delete activeProcesses[profileId];
         clearProfileRuntimeLanguageState(profileId);
+        if (macProfileApp) {
+            await restoreMacProfileLauncher(macProfileApp).catch((error) => {
+                console.warn(`[macOS Dock] Failed to restore launcher after launch error for ${profile.name || profileId}:`, error.message);
+            });
+        }
         if (!sender.isDestroyed()) {
             sender.send('profile-status', { id: profileId, status: 'stopped' });
         }
@@ -6465,6 +6508,9 @@ app.on('before-quit', () => {
     isAppQuitting = true;
     Object.values(activeProcesses).forEach((proc) => {
         proc.stopping = true;
+        if (proc.macProfileApp) {
+            try { restoreMacProfileLauncherSync(proc.macProfileApp); } catch (e) { }
+        }
     });
 });
 

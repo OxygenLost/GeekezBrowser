@@ -6,9 +6,10 @@ import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
 const MANIFEST_NAME = '.geekez-profile-app.json';
-const MANIFEST_VERSION = 2;
-const PROFILE_LAUNCHER_NAME = 'GeekEZ Profile Launcher';
+const MANIFEST_VERSION = 3;
 const PROFILE_ID_RESOURCE = 'geekez-profile-id';
+const REAL_EXECUTABLE_SUFFIX = '.geekez-real';
+const LAUNCHER_EXECUTABLE_SUFFIX = '.geekez-launcher';
 
 function stableProfileKey(profileId) {
     return crypto
@@ -48,22 +49,111 @@ async function setPlistString(plistPath, key, value) {
     ]);
 }
 
-async function installProfileLauncher(appPath, profileId) {
-    const launcherPath = path.join(appPath, 'Contents', 'MacOS', PROFILE_LAUNCHER_NAME);
+function profileExecutablePaths(appPath, executableName) {
+    const executablePath = path.join(appPath, 'Contents', 'MacOS', executableName);
+    return {
+        executablePath,
+        realExecutablePath: `${executablePath}${REAL_EXECUTABLE_SUFFIX}`,
+        launcherExecutablePath: `${executablePath}${LAUNCHER_EXECUTABLE_SUFFIX}`
+    };
+}
+
+async function replaceExecutableLink(sourcePath, targetPath) {
+    const temporaryPath = `${targetPath}.${process.pid}.${Date.now()}.swap`;
+    await fs.remove(temporaryPath);
+    try {
+        await fs.link(sourcePath, temporaryPath);
+        await fs.rename(temporaryPath, targetPath);
+    } catch (error) {
+        await fs.remove(temporaryPath).catch(() => { });
+        throw error;
+    }
+}
+
+function replaceExecutableLinkSync(sourcePath, targetPath) {
+    const temporaryPath = `${targetPath}.${process.pid}.${Date.now()}.swap`;
+    try { fs.removeSync(temporaryPath); } catch (e) { }
+    try {
+        fs.linkSync(sourcePath, temporaryPath);
+        fs.renameSync(temporaryPath, targetPath);
+    } finally {
+        try { fs.removeSync(temporaryPath); } catch (e) { }
+    }
+}
+
+async function installProfileLauncher(appPath, profileId, executableName) {
+    const {
+        executablePath,
+        realExecutablePath,
+        launcherExecutablePath
+    } = profileExecutablePaths(appPath, executableName);
     const resourceDir = path.join(appPath, 'Contents', 'Resources');
     const profileIdPath = path.join(resourceDir, PROFILE_ID_RESOURCE);
     const launcherScript = `#!/bin/sh
-set -eu
+set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROFILE_ID=$(cat "$SCRIPT_DIR/../Resources/${PROFILE_ID_RESOURCE}")
-exec /usr/bin/open -n -b com.geekez.browser --args "--geekez-profile=$PROFILE_ID"
+
+request_profile() {
+    /usr/bin/curl -fsS --max-time 1 -X POST \
+        -H "X-GeekEZ-Profile-Shortcut: 1" \
+        "http://127.0.0.1:12139/api/profile-shortcut?profileId=$PROFILE_ID" \
+        >/dev/null 2>&1
+}
+
+if request_profile; then
+    exit 0
+fi
+
+/usr/bin/open -b com.geekez.browser --args "--geekez-profile=$PROFILE_ID" >/dev/null 2>&1 || true
+
+i=0
+while [ "$i" -lt 50 ]; do
+    /bin/sleep 0.1
+    if request_profile; then
+        exit 0
+    fi
+    i=$((i + 1))
+done
+
+exit 0
 `;
 
     await fs.ensureDir(resourceDir);
     await fs.writeFile(profileIdPath, String(profileId), 'utf8');
-    await fs.writeFile(launcherPath, launcherScript, { mode: 0o755 });
-    await fs.chmod(launcherPath, 0o755);
-    await setPlistString(path.join(appPath, 'Contents', 'Info.plist'), 'CFBundleExecutable', PROFILE_LAUNCHER_NAME);
+    if (!await fs.pathExists(realExecutablePath)) {
+        await fs.move(executablePath, realExecutablePath, { overwrite: true });
+    }
+    await fs.writeFile(launcherExecutablePath, launcherScript, { mode: 0o755 });
+    await fs.chmod(launcherExecutablePath, 0o755);
+    await setPlistString(path.join(appPath, 'Contents', 'Info.plist'), 'CFBundleExecutable', executableName);
+    await replaceExecutableLink(launcherExecutablePath, executablePath);
+}
+
+async function activateMacProfileChromium(options = {}) {
+    const { appPath, executableName } = options;
+    if (process.platform !== 'darwin' || !appPath || !executableName) return;
+    const { executablePath, realExecutablePath } = profileExecutablePaths(appPath, executableName);
+    if (!await fs.pathExists(realExecutablePath)) {
+        throw new Error(`Missing preserved Chromium executable: ${realExecutablePath}`);
+    }
+    await replaceExecutableLink(realExecutablePath, executablePath);
+}
+
+async function restoreMacProfileLauncher(options = {}) {
+    const { appPath, executableName } = options;
+    if (process.platform !== 'darwin' || !appPath || !executableName) return;
+    const { executablePath, launcherExecutablePath } = profileExecutablePaths(appPath, executableName);
+    if (!await fs.pathExists(launcherExecutablePath)) return;
+    await replaceExecutableLink(launcherExecutablePath, executablePath);
+}
+
+function restoreMacProfileLauncherSync(options = {}) {
+    const { appPath, executableName } = options;
+    if (process.platform !== 'darwin' || !appPath || !executableName) return;
+    const { executablePath, launcherExecutablePath } = profileExecutablePaths(appPath, executableName);
+    if (!fs.pathExistsSync(launcherExecutablePath)) return;
+    replaceExecutableLinkSync(launcherExecutablePath, executablePath);
 }
 
 async function sourceFingerprint(sourceExecutable, sourceAppPath) {
@@ -160,7 +250,10 @@ async function prepareMacProfileChromium(options = {}) {
     const appFileName = existingAppFileName || `${displayName}.app`;
     const appPath = path.join(profileRoot, appFileName);
     const executablePath = path.join(appPath, 'Contents', 'MacOS', sourceExecutableName);
-    const launcherPath = path.join(appPath, 'Contents', 'MacOS', PROFILE_LAUNCHER_NAME);
+    const {
+        realExecutablePath,
+        launcherExecutablePath
+    } = profileExecutablePaths(appPath, sourceExecutableName);
     const profileIdPath = path.join(appPath, 'Contents', 'Resources', PROFILE_ID_RESOURCE);
     const fingerprint = await sourceFingerprint(sourceExecutable, sourceAppPath);
 
@@ -173,21 +266,20 @@ async function prepareMacProfileChromium(options = {}) {
     const canReuse = Boolean(
         sourceMatches &&
         manifest.version === MANIFEST_VERSION &&
-        await fs.pathExists(launcherPath) &&
+        await fs.pathExists(realExecutablePath) &&
+        await fs.pathExists(launcherExecutablePath) &&
         await fs.pathExists(profileIdPath)
     );
 
     if (!sourceMatches) {
         await cloneAppBundle(sourceAppPath, appPath);
         await updateProfileIdentity(appPath, bundleId, displayName);
-        await installProfileLauncher(appPath, profileId);
+        await installProfileLauncher(appPath, profileId, sourceExecutableName);
     } else if (!canReuse) {
-        // Upgrade an already pinned v1 profile app in place. Replacing the
-        // bundle while Chromium is running can disrupt helper/resource loads,
-        // while updating the launcher metadata is safe and preserves the
-        // exact path referenced by the Dock item.
+        // Upgrade an already pinned profile app in place while preserving the
+        // exact .app path referenced by the Dock item.
         await updateProfileIdentity(appPath, bundleId, displayName);
-        await installProfileLauncher(appPath, profileId);
+        await installProfileLauncher(appPath, profileId, sourceExecutableName);
     } else if (manifest.displayName !== displayName) {
         // Keep the .app path stable for an already pinned Dock item, while still
         // updating the visible application metadata after a profile rename.
@@ -202,10 +294,17 @@ async function prepareMacProfileChromium(options = {}) {
         sourceFingerprint: fingerprint
     }, { spaces: 2 });
 
+    // The pinned app is idle with a launcher at its normal executable path.
+    // Just before Puppeteer launches it, swap the real Chromium binary back
+    // into that exact path so LaunchServices registers the profile-specific
+    // bundle identity rather than GeekEZ's parent identity.
+    await activateMacProfileChromium({ appPath, executableName: sourceExecutableName });
+
     return {
         executablePath,
         appPath,
         bundleId,
+        executableName: sourceExecutableName,
         reused: canReuse
     };
 }
@@ -217,11 +316,14 @@ async function removeMacProfileApp(options = {}) {
 }
 
 export {
+    activateMacProfileChromium,
     findAppBundle,
     installProfileLauncher,
     prepareMacProfileChromium,
     profileBundleId,
     removeMacProfileApp,
+    restoreMacProfileLauncher,
+    restoreMacProfileLauncherSync,
     sanitizeAppLabel,
     stableProfileKey
 };
